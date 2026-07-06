@@ -4,6 +4,7 @@
 #include "Subsystem/McpEditorSubsystem.h"
 #include "UEBridgeMCPEditor.h"
 #include "ToolMenus.h"
+#include "Framework/Commands/UIAction.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Images/SImage.h"
@@ -15,7 +16,14 @@
 
 #define LOCTEXT_NAMESPACE "UEBridgeMCP"
 
+namespace
+{
+	const FName UEBridgeMCPMenuOwnerName(TEXT("UEBridgeMCP"));
+	const FName UEBridgeMCPSectionName(TEXT("UEBridgeMCP"));
+}
+
 bool FMcpToolbarExtension::bIsInitialized = false;
+FDelegateHandle FMcpToolbarExtension::StartupCallbackHandle;
 
 void FMcpToolbarExtension::Initialize()
 {
@@ -25,7 +33,7 @@ void FMcpToolbarExtension::Initialize()
 	}
 
 	// Register when ToolMenus is ready
-	UToolMenus::RegisterStartupCallback(
+	StartupCallbackHandle = UToolMenus::RegisterStartupCallback(
 		FSimpleMulticastDelegate::FDelegate::CreateStatic(&FMcpToolbarExtension::RegisterStatusBarExtension));
 
 	bIsInitialized = true;
@@ -41,7 +49,13 @@ void FMcpToolbarExtension::Shutdown()
 	UToolMenus* ToolMenus = UToolMenus::Get();
 	if (ToolMenus)
 	{
-		ToolMenus->UnregisterOwner("UEBridgeMCP");
+		if (StartupCallbackHandle.IsValid())
+		{
+			ToolMenus->UnRegisterStartupCallback(StartupCallbackHandle);
+			StartupCallbackHandle.Reset();
+		}
+
+		ToolMenus->UnregisterOwner(UEBridgeMCPMenuOwnerName);
 	}
 
 	bIsInitialized = false;
@@ -58,11 +72,17 @@ void FMcpToolbarExtension::RegisterStatusBarExtension()
 
 	UE_LOG(LogUEBridgeMCPEditor, Log, TEXT("MCP Status bar: Registering extension..."));
 
-	// Primary: Status bar (UE 5.0-5.6)
+	ToolMenus->UnregisterOwner(UEBridgeMCPMenuOwnerName);
+	FToolMenuOwnerScoped OwnerScoped(UEBridgeMCPMenuOwnerName);
+
+	const FSlateIcon RestartIcon(FAppStyle::GetAppStyleSetName(), "Icons.Refresh");
+	const FUIAction RestartAction(FExecuteAction::CreateStatic(&FMcpToolbarExtension::RestartServer));
+
+	// Primary: Status bar. Keep this for users who expect the bottom-window indicator.
 	UToolMenu* StatusBar = ToolMenus->ExtendMenu(TEXT("LevelEditor.StatusBar.ToolBar"));
 	if (StatusBar)
 	{
-		FToolMenuSection& Section = StatusBar->FindOrAddSection("UEBridgeMCP");
+		FToolMenuSection& Section = StatusBar->FindOrAddSection(UEBridgeMCPSectionName, FText::GetEmpty(), FToolMenuInsert(NAME_None, EToolMenuInsertType::First));
 
 		Section.AddEntry(FToolMenuEntry::InitWidget(
 			"McpStatus",
@@ -74,11 +94,11 @@ void FMcpToolbarExtension::RegisterStatusBarExtension()
 		UE_LOG(LogUEBridgeMCPEditor, Log, TEXT("MCP Status bar: Registered on LevelEditor.StatusBar.ToolBar"));
 	}
 
-	// Fallback: Main toolbar (in case status bar menu changed in UE 5.7+)
+	// Fallback: Main toolbar. UE 5.7+ layouts can hide the status bar entry depending on window chrome.
 	UToolMenu* MainToolbar = ToolMenus->ExtendMenu(TEXT("LevelEditor.LevelEditorToolBar.User"));
 	if (MainToolbar)
 	{
-		FToolMenuSection& Section = MainToolbar->FindOrAddSection("UEBridgeMCP");
+		FToolMenuSection& Section = MainToolbar->FindOrAddSection(UEBridgeMCPSectionName, LOCTEXT("UEBridgeMCPToolbarSection", "UEBridgeMCP"));
 
 		Section.AddEntry(FToolMenuEntry::InitWidget(
 			"McpStatusToolbar",
@@ -87,8 +107,34 @@ void FMcpToolbarExtension::RegisterStatusBarExtension()
 			true  // bNoIndent
 		));
 
-		UE_LOG(LogUEBridgeMCPEditor, Log, TEXT("MCP Status bar: Also registered on LevelEditor.LevelEditorToolBar.User (fallback)"));
+		FToolMenuEntry ToolbarEntry = FToolMenuEntry::InitToolBarButton(
+			"UEBridgeMCPRestartToolbar",
+			RestartAction,
+			LOCTEXT("UEBridgeMCPToolbarLabel", "UEBridgeMCP"),
+			LOCTEXT("UEBridgeMCPToolbarTooltip", "Restart the UEBridgeMCP server"),
+			RestartIcon);
+		ToolbarEntry.StyleNameOverride = "CalloutToolbar";
+		Section.AddEntry(ToolbarEntry);
+
+		UE_LOG(LogUEBridgeMCPEditor, Log, TEXT("MCP Status bar: Also registered on LevelEditor.LevelEditorToolBar.User (fallback toolbar)"));
 	}
+
+	// Always-visible command path from the main menu.
+	UToolMenu* ToolsMenu = ToolMenus->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
+	if (ToolsMenu)
+	{
+		FToolMenuSection& Section = ToolsMenu->FindOrAddSection(UEBridgeMCPSectionName, LOCTEXT("UEBridgeMCPToolsSection", "UEBridgeMCP"));
+		Section.AddMenuEntry(
+			"UEBridgeMCPRestartServer",
+			LOCTEXT("UEBridgeMCPRestartLabel", "UEBridgeMCP: Restart MCP Server"),
+			LOCTEXT("UEBridgeMCPRestartTooltip", "Restart the local UEBridgeMCP server used by MCP clients."),
+			RestartIcon,
+			RestartAction);
+
+		UE_LOG(LogUEBridgeMCPEditor, Log, TEXT("MCP Status bar: Registered on LevelEditor.MainMenu.Tools"));
+	}
+
+	ToolMenus->RefreshAllWidgets();
 }
 
 TSharedRef<SWidget> FMcpToolbarExtension::CreateStatusWidget()
@@ -119,7 +165,7 @@ TSharedRef<SWidget> FMcpToolbarExtension::CreateStatusWidget()
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
-				.Text(LOCTEXT("McpLabel", "MCP"))
+				.Text(LOCTEXT("McpLabel", "UEBridgeMCP"))
 				.TextStyle(&FAppStyle::Get().GetWidgetStyle<FTextBlockStyle>("SmallText"))
 			]
 		];
@@ -220,13 +266,18 @@ FText FMcpToolbarExtension::GetStatusTooltip()
 		FText::FromString(Extra));
 }
 
-FReply FMcpToolbarExtension::OnStatusButtonClicked()
+void FMcpToolbarExtension::RestartServer()
 {
 	UMcpEditorSubsystem* Subsystem = GetSubsystem();
 	if (Subsystem)
 	{
 		Subsystem->RestartServer();
 	}
+}
+
+FReply FMcpToolbarExtension::OnStatusButtonClicked()
+{
+	RestartServer();
 
 	return FReply::Handled();
 }

@@ -23,6 +23,9 @@ private:
 	/** Register the status bar extension via UToolMenus */
 	static void RegisterStatusBarExtension();
 
+	/** Restart the MCP server from menu/toolbar actions */
+	static void RestartServer();
+
 	/** Build the status widget */
 	static TSharedRef<SWidget> CreateStatusWidget();
 
@@ -43,4 +46,7 @@ private:
 
 	/** Whether we've been initialized */
 	static bool bIsInitialized;
+
+	/** Startup callback used by ToolMenus */
+	static FDelegateHandle StartupCallbackHandle;
 };
