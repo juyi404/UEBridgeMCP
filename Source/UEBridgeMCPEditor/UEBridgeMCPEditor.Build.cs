@@ -1,5 +1,3 @@
-// Copyright uuuuzz 2024-2026. All Rights Reserved.
-
 using UnrealBuildTool;
 
 public class UEBridgeMCPEditor : ModuleRules
@@ -10,116 +8,79 @@ public class UEBridgeMCPEditor : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
-			"Core",
-			"CoreUObject",
-			"Engine",
-			"ApplicationCore",
-			"UEBridgeMCP"
+			"Core"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			// HTTP Server
+			"UEBridgeMCPCore",
+			"UEBridgeMCPSpatialTools",
+			"AIModule",
+			"AnimGraph",
+			"AnimationEditor",
+			"ApplicationCore",
+			"AppFramework",
+			"AssetRegistry",
+			"AssetTools",
+			"BlueprintEditorLibrary",
+			"BlueprintGraph",
+			"ContentBrowser",
+			"ControlRig",
+			"DataValidation",
+			"DesktopPlatform",
+			"EditorScriptingUtilities",
+			"EditorStyle",
+			"EditorSubsystem",
+			"EditorWidgets",
+			"EnhancedInput",
+			"Foliage",
+			"GameplayAbilities",
+			"GameplayTags",
+			"GameplayTasks",
+			"CoreUObject",
+			"Engine",
 			"HTTP",
 			"HTTPServer",
-
-			// Editor Framework
-			"UnrealEd",
-			"EditorSubsystem",
-			"ToolMenus",
-			"Slate",
-			"SlateCore",
-			"StatusBar",
-
-			// Blueprint/Kismet
-			"Kismet",
-			"KismetCompiler",
-			"BlueprintGraph",
-			"GraphEditor",
-			"MaterialEditor",
-			"StaticMeshEditor",
-
-			// Animation Blueprint
-			"AnimGraph",
-
-			// Asset Management
-			"AssetTools",
-			"AssetRegistry",
-			"ContentBrowser",
-
-			// Level Editing
-			"LevelEditor",
-			"EditorScriptingUtilities",
-
-			// UI/Widgets
-			"UMG",
-			"UMGEditor",
-			"PropertyEditor",
-			"PropertyPath",
-
-			// Animation/Sequencer (for UMG animations)
-			"MovieScene",
-			"MovieSceneTracks",
-			"LevelSequence",
-			"Landscape",
-			"Foliage",
-
-			// Niagara
-			"Niagara",
-			"NiagaraEditor",
-
-			// Audio
-			"AudioEditor",
-
-			// Physics
-			"PhysicsCore",
-
-			// MetaSound
-			"MetasoundEngine",
-			"MetasoundFrontend",
-			"MetasoundEditor",
-
-			// JSON
+			"IKRig",
+			"InputCore",
 			"Json",
 			"JsonUtilities",
-			"ImageCore",
-
-			// Input
-			"InputCore",
-			"EnhancedInput",
-
-			// AI/Navigation (for PIE input tools)
-			"AIModule",
+			"Kismet",
+			"KismetCompiler",
+			"Landscape",
+			"LevelEditor",
+			"LevelSequence",
+			"MaterialEditor",
+			"MeshDescription",
+			"MovieScene",
+			"MovieSceneTracks",
 			"NavigationSystem",
-
-			// Project Settings
-			"GameplayTags",
-			"EngineSettings",
-			"Projects",
-
-			// StateTree
-			"StateTreeModule",
-			"StateTreeEditorModule",
-			"GameplayStateTreeModule",
+			"Niagara",
+			"NiagaraEditor",
+			// PCG / PCGEditor moved to the UEBridgeMCPPCGTools module.
 			"PropertyBindingUtils",
-
-			// Gameplay
-			"GameplayAbilities",
-			"GameplayAbilitiesEditor",
-			"GameplayTasks",
-
-			// Python Scripting
-
+			"PropertyEditor",
+			"Projects",
 			"PythonScriptPlugin",
-
-			// Live Coding
-			"LiveCoding",
-
-			// Source Control (for SCM diff tool)
-			"SourceControl"
+			"RenderCore",
+			"RHI",
+			"Sequencer",
+			"Slate",
+			"SlateCore",
+			"StateTreeEditorModule",
+			"StateTreeModule",
+			"StaticMeshDescription",
+			"SubobjectDataInterface",
+			"ToolMenus",
+			"UMG",
+			"UMGEditor",
+			"WorkspaceMenuStructure",
+			"UnrealEd"
 		});
 
-		PublicDefinitions.Add("HAS_GAMEPLAY_ABILITIES=1");
-		PublicDefinitions.Add("HAS_GAMEPLAY_STATE_TREE=1");
+		if (Target.Platform == UnrealTargetPlatform.Win64)
+		{
+			PrivateDependencyModuleNames.Add("LiveCoding");
+		}
 	}
 }

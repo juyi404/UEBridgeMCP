@@ -1,25 +1,19 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.19.0",
-	"FriendlyName": "UE Bridge MCP",
-	"Description": "Native C++ Model Context Protocol (MCP) server for Unreal Engine 5.6+. Enables AI assistants to interact with UE Editor via HTTP.",
-	"Category": "Editor",
-	"CreatedBy": "uuuuzz",
-	"CreatedByURL": "https://github.com/uuuuzz/UEBridgeMCP",
-	"DocsURL": "https://github.com/uuuuzz/UEBridgeMCP/blob/main/README.md",
-	"MarketplaceURL": "",
-	"SupportURL": "https://github.com/uuuuzz/UEBridgeMCP/issues",
+	"Version": 2,
+	"VersionName": "0.2.0",
+	"FriendlyName": "World Data MCP Bridge",
+	"Description": "Embedded MCP server for WorldDataEngine editor automation.",
+	"Category": "WorldDataEngine",
+	"CreatedBy": "WorldDataEngine",
 	"CanContainContent": false,
-	"IsBetaVersion": false,
-	"IsExperimentalVersion": true,
+	"IsBetaVersion": true,
 	"Installed": false,
-	"EnabledByDefault": false,
 	"Modules": [
 		{
-			"Name": "UEBridgeMCP",
+			"Name": "UEBridgeMCPCore",
 			"Type": "EditorNoCommandlet",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "PostEngineInit"
 		},
 		{
 			"Name": "UEBridgeMCPEditor",
@@ -27,28 +21,31 @@
 			"LoadingPhase": "PostEngineInit"
 		},
 		{
-			"Name": "UEBridgeMCPControlRig",
+			"Name": "UEBridgeMCPPCGTools",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "PostEngineInit"
 		},
 		{
-			"Name": "UEBridgeMCPPCG",
-			"Type": "EditorNoCommandlet",
-			"LoadingPhase": "PostEngineInit"
-		},
-		{
-			"Name": "UEBridgeMCPExternalAI",
+			"Name": "UEBridgeMCPSpatialTools",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "PostEngineInit"
 		}
 	],
 	"Plugins": [
 		{
-			"Name": "EditorScriptingUtilities",
+			"Name": "PythonScriptPlugin",
 			"Enabled": true
 		},
 		{
-			"Name": "GameplayAbilities",
+			"Name": "ControlRig",
+			"Enabled": true
+		},
+		{
+			"Name": "DataValidation",
+			"Enabled": true
+		},
+		{
+			"Name": "EditorScriptingUtilities",
 			"Enabled": true
 		},
 		{
@@ -56,37 +53,32 @@
 			"Enabled": true
 		},
 		{
-			"Name": "StateTree",
+			"Name": "GameplayAbilities",
 			"Enabled": true
 		},
 		{
-			"Name": "GameplayStateTree",
+			"Name": "IKRig",
 			"Enabled": true
-		},
-		{
-			"Name": "PythonScriptPlugin",
-			"Enabled": true,
-			"Optional": true
-		},
-		{
-			"Name": "ControlRig",
-			"Enabled": true,
-			"Optional": true
-		},
-		{
-			"Name": "PCG",
-			"Enabled": true,
-			"Optional": true
 		},
 		{
 			"Name": "Niagara",
-			"Enabled": true,
-			"Optional": true
+			"Enabled": true
 		},
 		{
-			"Name": "Metasound",
-			"Enabled": true,
-			"Optional": true
+			"Name": "PCG",
+			"Enabled": true
+		},
+		{
+			"Name": "PoseSearch",
+			"Enabled": true
+		},
+		{
+			"Name": "PropertyBindingUtils",
+			"Enabled": true
+		},
+		{
+			"Name": "StateTree",
+			"Enabled": true
 		}
 	]
 }
