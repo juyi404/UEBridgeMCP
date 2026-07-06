@@ -125,6 +125,7 @@ private:
 
 	TSharedPtr<FInteractiveProcess> Process;
 	FString StdoutBuffer;
+	TArray<FString> RecentAdapterDiagnostics;
 	FString SessionId;
 	FString PendingPrompt;
 	FString InFlightPrompt;

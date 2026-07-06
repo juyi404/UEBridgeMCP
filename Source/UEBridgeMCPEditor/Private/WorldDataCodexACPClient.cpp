@@ -210,37 +210,44 @@ namespace
 
 		auto ExtractRelativeTarget = [&Content, &ShimDir, &OutTarget](const FString& Needle) -> bool
 		{
-			int32 Start = Content.Find(Needle, ESearchCase::IgnoreCase);
-			if (Start == INDEX_NONE)
+			int32 SearchStart = 0;
+			while (SearchStart < Content.Len())
 			{
-				return false;
-			}
-
-			Start += Needle.Len();
-			int32 End = Start;
-			while (End < Content.Len())
-			{
-				const TCHAR Ch = Content[End];
-				if (Ch == TEXT('"') || Ch == TEXT('\'') || Ch == TEXT(' ') || Ch == TEXT('\r') || Ch == TEXT('\n') || Ch == TEXT('\t'))
+				int32 Start = Content.Find(Needle, ESearchCase::IgnoreCase, ESearchDir::FromStart, SearchStart);
+				if (Start == INDEX_NONE)
 				{
-					break;
+					return false;
 				}
-				++End;
-			}
 
-			const FString RelativeTarget = Content.Mid(Start, End - Start);
-			if (!RelativeTarget.Contains(TEXT("node_modules"), ESearchCase::IgnoreCase)
-				|| !(RelativeTarget.EndsWith(TEXT(".js"), ESearchCase::IgnoreCase)
-					|| RelativeTarget.EndsWith(TEXT(".mjs"), ESearchCase::IgnoreCase)
-					|| RelativeTarget.EndsWith(TEXT(".cjs"), ESearchCase::IgnoreCase)))
-			{
-				return false;
-			}
+				Start += Needle.Len();
+				SearchStart = Start;
+				int32 End = Start;
+				while (End < Content.Len())
+				{
+					const TCHAR Ch = Content[End];
+					if (Ch == TEXT('"') || Ch == TEXT('\'') || Ch == TEXT(' ') || Ch == TEXT('\r') || Ch == TEXT('\n') || Ch == TEXT('\t'))
+					{
+						break;
+					}
+					++End;
+				}
 
-			OutTarget = FPaths::Combine(ShimDir, RelativeTarget);
-			FPaths::CollapseRelativeDirectories(OutTarget);
-			FPaths::MakePlatformFilename(OutTarget);
-			return true;
+				const FString RelativeTarget = Content.Mid(Start, End - Start);
+				if (!RelativeTarget.Contains(TEXT("node_modules"), ESearchCase::IgnoreCase)
+					|| !(RelativeTarget.EndsWith(TEXT(".js"), ESearchCase::IgnoreCase)
+						|| RelativeTarget.EndsWith(TEXT(".mjs"), ESearchCase::IgnoreCase)
+						|| RelativeTarget.EndsWith(TEXT(".cjs"), ESearchCase::IgnoreCase)))
+				{
+					SearchStart = End + 1;
+					continue;
+				}
+
+				OutTarget = FPaths::Combine(ShimDir, RelativeTarget);
+				FPaths::CollapseRelativeDirectories(OutTarget);
+				FPaths::MakePlatformFilename(OutTarget);
+				return true;
+			}
+			return false;
 		};
 
 		return ExtractRelativeTarget(TEXT("%dp0%\\"))
@@ -265,7 +272,7 @@ namespace
 			}
 		}
 
-		if (Ext.IsEmpty() || Ext == TEXT("cmd") || Ext == TEXT("bat"))
+		if (Ext.IsEmpty() || Ext == TEXT("cmd") || Ext == TEXT("bat") || Ext == TEXT("ps1"))
 		{
 			FString ShimTarget;
 			if (TryResolveNodeShimTarget(Candidate, ShimTarget) && !PathExists(ShimTarget))
@@ -789,6 +796,7 @@ void FWorldDataCodexACPClient::Stop()
 	}
 
 	StdoutBuffer.Empty();
+	RecentAdapterDiagnostics.Empty();
 	SessionId.Empty();
 	PendingPrompt.Empty();
 	InFlightPrompt.Empty();
@@ -942,6 +950,7 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 
 	FString WorkingDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	FPaths::MakePlatformFilename(WorkingDir);
+	RecentAdapterDiagnostics.Empty();
 
 	if (GEngine)
 	{
@@ -1339,6 +1348,21 @@ void FWorldDataCodexACPClient::ProcessLine(const FString& Line)
 	if (!FJsonSerializer::Deserialize(Reader, Message) || !Message.IsValid())
 	{
 		UE_LOG(LogWorldDataCodexACP, Warning, TEXT("ACP stdout line was not JSON: %s"), *Line);
+		FString Diagnostic = Line.TrimStartAndEnd();
+		const int32 MaxDiagnosticLen = 1200;
+		if (Diagnostic.Len() > MaxDiagnosticLen)
+		{
+			Diagnostic = Diagnostic.Left(MaxDiagnosticLen) + FString::Printf(TEXT("...(+%d 字符)"), Diagnostic.Len() - MaxDiagnosticLen);
+		}
+		if (!Diagnostic.IsEmpty())
+		{
+			RecentAdapterDiagnostics.Add(Diagnostic);
+			const int32 MaxDiagnostics = 8;
+			while (RecentAdapterDiagnostics.Num() > MaxDiagnostics)
+			{
+				RecentAdapterDiagnostics.RemoveAt(0);
+			}
+		}
 		return;
 	}
 
@@ -1965,11 +1989,21 @@ FString FWorldDataCodexACPClient::JsonToString(const TSharedPtr<FJsonObject>& Ob
 
 void FWorldDataCodexACPClient::Fail(const FString& Message)
 {
-	LastError = Message;
-	UE_LOG(LogWorldDataCodexACP, Warning, TEXT("%s"), *Message);
+	FString FullMessage = Message;
+	if (!RecentAdapterDiagnostics.IsEmpty())
+	{
+		FullMessage += TEXT("\n\n最近适配器输出：");
+		for (const FString& Diagnostic : RecentAdapterDiagnostics)
+		{
+			FullMessage += TEXT("\n- ") + Diagnostic;
+		}
+	}
+
+	LastError = FullMessage;
+	UE_LOG(LogWorldDataCodexACP, Warning, TEXT("%s"), *FullMessage);
 	if (OnError.IsBound())
 	{
-		OnError.Execute(Message);
+		OnError.Execute(FullMessage);
 	}
 }
 
