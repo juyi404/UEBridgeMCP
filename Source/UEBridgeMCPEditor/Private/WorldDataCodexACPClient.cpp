@@ -196,6 +196,98 @@ namespace
 		OutBaseNames.Add(TEXT("codex-acp"));
 	}
 
+#if PLATFORM_WINDOWS
+	static bool TryResolveNodeShimTarget(const FString& ShimPath, FString& OutTarget)
+	{
+		FString Content;
+		if (!FFileHelper::LoadFileToString(Content, *ShimPath))
+		{
+			return false;
+		}
+
+		Content.ReplaceInline(TEXT("/"), TEXT("\\"));
+		const FString ShimDir = FPaths::GetPath(ShimPath);
+
+		auto ExtractRelativeTarget = [&Content, &ShimDir, &OutTarget](const FString& Needle) -> bool
+		{
+			int32 Start = Content.Find(Needle, ESearchCase::IgnoreCase);
+			if (Start == INDEX_NONE)
+			{
+				return false;
+			}
+
+			Start += Needle.Len();
+			int32 End = Start;
+			while (End < Content.Len())
+			{
+				const TCHAR Ch = Content[End];
+				if (Ch == TEXT('"') || Ch == TEXT('\'') || Ch == TEXT(' ') || Ch == TEXT('\r') || Ch == TEXT('\n') || Ch == TEXT('\t'))
+				{
+					break;
+				}
+				++End;
+			}
+
+			const FString RelativeTarget = Content.Mid(Start, End - Start);
+			if (!RelativeTarget.Contains(TEXT("node_modules"), ESearchCase::IgnoreCase)
+				|| !(RelativeTarget.EndsWith(TEXT(".js"), ESearchCase::IgnoreCase)
+					|| RelativeTarget.EndsWith(TEXT(".mjs"), ESearchCase::IgnoreCase)
+					|| RelativeTarget.EndsWith(TEXT(".cjs"), ESearchCase::IgnoreCase)))
+			{
+				return false;
+			}
+
+			OutTarget = FPaths::Combine(ShimDir, RelativeTarget);
+			FPaths::CollapseRelativeDirectories(OutTarget);
+			FPaths::MakePlatformFilename(OutTarget);
+			return true;
+		};
+
+		return ExtractRelativeTarget(TEXT("%dp0%\\"))
+			|| ExtractRelativeTarget(TEXT("$basedir\\"));
+	}
+
+	static bool IsLaunchableAdapterCandidate(EWorldDataAcpAgent InAgent, const FString& Candidate)
+	{
+		if (!PathExists(Candidate))
+		{
+			return false;
+		}
+
+		const FString Ext = FPaths::GetExtension(Candidate).ToLower();
+		if (Ext.IsEmpty())
+		{
+			FString Content;
+			if (FFileHelper::LoadFileToString(Content, *Candidate) && Content.StartsWith(TEXT("#!/bin/sh")))
+			{
+				UE_LOG(LogWorldDataCodexACP, Verbose, TEXT("Skipping Unix shell ACP shim on Windows: %s"), *Candidate);
+				return false;
+			}
+		}
+
+		if (Ext.IsEmpty() || Ext == TEXT("cmd") || Ext == TEXT("bat"))
+		{
+			FString ShimTarget;
+			if (TryResolveNodeShimTarget(Candidate, ShimTarget) && !PathExists(ShimTarget))
+			{
+				UE_LOG(LogWorldDataCodexACP, Warning,
+					TEXT("Skipping broken %s ACP adapter shim: %s targets missing module %s"),
+					*FWorldDataCodexACPClient::GetAdapterBaseName(InAgent),
+					*Candidate,
+					*ShimTarget);
+				return false;
+			}
+		}
+
+		return true;
+	}
+#else
+	static bool IsLaunchableAdapterCandidate(EWorldDataAcpAgent InAgent, const FString& Candidate)
+	{
+		return PathExists(Candidate);
+	}
+#endif
+
 	static TSharedPtr<FJsonValue> ExtractRpcId(const TSharedPtr<FJsonObject>& Message)
 	{
 		if (!Message.IsValid())
@@ -902,10 +994,21 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 #if PLATFORM_WINDOWS
 		if (Ext == TEXT("cmd") || Ext == TEXT("bat"))
 		{
-			LaunchExe = TEXT("cmd.exe");
-			LaunchArgs = AdapterSubcommandArgs.IsEmpty()
-				? FString::Printf(TEXT("/c \"\"%s\"\""), *AdapterBinary)
-				: FString::Printf(TEXT("/c \"\"%s\"%s\""), *AdapterBinary, *AdapterSubcommandArgs);
+			const FString PowerShellWrapper = FPaths::ChangeExtension(AdapterBinary, TEXT("ps1"));
+			if (FPaths::FileExists(PowerShellWrapper))
+			{
+				LaunchExe = TEXT("powershell.exe");
+				LaunchArgs = AdapterSubcommandArgs.IsEmpty()
+					? FString::Printf(TEXT("-NoProfile -ExecutionPolicy Bypass -File \"%s\""), *PowerShellWrapper)
+					: FString::Printf(TEXT("-NoProfile -ExecutionPolicy Bypass -File \"%s\"%s"), *PowerShellWrapper, *AdapterSubcommandArgs);
+			}
+			else
+			{
+				LaunchExe = TEXT("cmd.exe");
+				LaunchArgs = AdapterSubcommandArgs.IsEmpty()
+					? FString::Printf(TEXT("/d /s /c \"\"%s\"\""), *AdapterBinary)
+					: FString::Printf(TEXT("/d /s /c \"\"%s\"%s\""), *AdapterBinary, *AdapterSubcommandArgs);
+			}
 		}
 		else
 #endif
@@ -967,6 +1070,10 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 	}
 
 	EmitStatus(FString::Printf(TEXT("已启动 %s 适配器：%s"), *GetAgentDisplayName(), *AdapterBinary));
+	UE_LOG(LogWorldDataCodexACP, Log, TEXT("Launched %s ACP adapter: %s %s"),
+		*GetAgentDisplayName(),
+		*LaunchExe,
+		*LaunchArgs);
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetNumberField(TEXT("protocolVersion"), 1);
@@ -1663,7 +1770,7 @@ FString FWorldDataCodexACPClient::FindAdapterBinaryForAgent(EWorldDataAcpAgent I
 	for (const TCHAR* EnvVarName : EnvVarNames)
 	{
 		const FString EnvPath = FPlatformMisc::GetEnvironmentVariable(EnvVarName);
-		if (PathExists(EnvPath))
+		if (IsLaunchableAdapterCandidate(InAgent, EnvPath))
 		{
 			return EnvPath;
 		}
@@ -1693,7 +1800,7 @@ FString FWorldDataCodexACPClient::FindAdapterBinaryForAgent(EWorldDataAcpAgent I
 				FString FullPath = FPaths::Combine(Dir, LaunchableName);
 				FullPath = FPaths::ConvertRelativePathToFull(FullPath);
 				FPaths::CollapseRelativeDirectories(FullPath);
-				if (PathExists(FullPath))
+				if (IsLaunchableAdapterCandidate(InAgent, FullPath))
 				{
 					return FullPath;
 				}
@@ -1701,7 +1808,7 @@ FString FWorldDataCodexACPClient::FindAdapterBinaryForAgent(EWorldDataAcpAgent I
 		}
 
 		const FString PathMatch = ResolveOnPath(BaseName);
-		if (!PathMatch.IsEmpty())
+		if (!PathMatch.IsEmpty() && IsLaunchableAdapterCandidate(InAgent, PathMatch))
 		{
 			return PathMatch;
 		}

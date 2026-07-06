@@ -29,6 +29,11 @@
 			"Name": "UEBridgeMCPSpatialTools",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "PostEngineInit"
+		},
+		{
+			"Name": "UEBridgeMCPAIDirectorTools",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "PostEngineInit"
 		}
 	],
 	"Plugins": [
@@ -78,6 +83,10 @@
 		},
 		{
 			"Name": "StateTree",
+			"Enabled": true
+		},
+		{
+			"Name": "AIDirectorCamera",
 			"Enabled": true
 		}
 	]

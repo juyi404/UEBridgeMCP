@@ -130,7 +130,7 @@ private:
 	FString InFlightPrompt;
 	FString LastError;
 	EWorldDataCodexPermissionMode PermissionMode = EWorldDataCodexPermissionMode::Default;
-	EWorldDataAcpAgent Agent = EWorldDataAcpAgent::Codex;
+	EWorldDataAcpAgent Agent = EWorldDataAcpAgent::Cursor;
 	FString Model;
 
 	int32 NextRpcId = 1;

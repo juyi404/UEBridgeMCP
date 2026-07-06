@@ -378,7 +378,7 @@ private:
 	FButtonStyle ComposerButtonStyle;
 	FComboButtonStyle ComposerComboButtonStyle;
 	EWorldDataCodexPermissionMode CurrentMode = EWorldDataCodexPermissionMode::Default;
-	EWorldDataAcpAgent CurrentAcpAgent = EWorldDataAcpAgent::Codex;
+	EWorldDataAcpAgent CurrentAcpAgent = EWorldDataAcpAgent::Cursor;
 	// Active CLI model id for the current agent; empty = adapter default.
 	FString CurrentModel;
 	FString CurrentCodexModel;
