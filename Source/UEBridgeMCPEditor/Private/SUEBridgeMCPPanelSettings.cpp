@@ -1185,6 +1185,13 @@ void SUEBridgeMCPPanel::LoadSettings()
 	}
 
 	NormalizeAgentModels();
+	if (CurrentAcpAgent == EWorldDataAcpAgent::Codex
+		&& FWorldDataCodexACPClient::FindAdapterBinaryForAgent(EWorldDataAcpAgent::Codex).IsEmpty()
+		&& !FWorldDataCodexACPClient::FindAdapterBinaryForAgent(EWorldDataAcpAgent::Cursor).IsEmpty())
+	{
+		CurrentAcpAgent = EWorldDataAcpAgent::Cursor;
+		CurrentModel = GetCurrentAgentModel();
+	}
 	SaveSettings();
 }
 
