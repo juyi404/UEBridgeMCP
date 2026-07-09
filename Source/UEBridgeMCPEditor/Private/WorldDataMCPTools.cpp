@@ -11,20 +11,29 @@
 #include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/Selection.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Factories/Factory.h"
+#include "FileHelpers.h"
 #include "GameFramework/Actor.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Misc/PackageName.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ScopedTransaction.h"
 #include "UObject/Class.h"
+#include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/TopLevelAssetPath.h"
 #include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
@@ -134,6 +143,165 @@ namespace
 		return false;
 	}
 
+	bool TryValueToNumber(const TSharedPtr<FJsonValue>& Value, double& OutNumber)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+		if (Value->Type == EJson::Number)
+		{
+			OutNumber = Value->AsNumber();
+			return true;
+		}
+		if (Value->Type == EJson::String)
+		{
+			OutNumber = FCString::Atod(*Value->AsString());
+			return true;
+		}
+		return false;
+	}
+
+	bool TryValueToBool(const TSharedPtr<FJsonValue>& Value, bool& bOutValue)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+		if (Value->Type == EJson::Boolean)
+		{
+			bOutValue = Value->AsBool();
+			return true;
+		}
+		if (Value->Type == EJson::String)
+		{
+			const FString Text = Value->AsString().ToLower();
+			if (Text == TEXT("true") || Text == TEXT("1") || Text == TEXT("yes"))
+			{
+				bOutValue = true;
+				return true;
+			}
+			if (Text == TEXT("false") || Text == TEXT("0") || Text == TEXT("no"))
+			{
+				bOutValue = false;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool TryValueToVector(const TSharedPtr<FJsonValue>& Value, FVector& OutVector)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		if (Value->TryGetArray(Array) && Array && Array->Num() >= 3)
+		{
+			double X = 0.0;
+			double Y = 0.0;
+			double Z = 0.0;
+			if (TryValueToNumber((*Array)[0], X) && TryValueToNumber((*Array)[1], Y) && TryValueToNumber((*Array)[2], Z))
+			{
+				OutVector = FVector(X, Y, Z);
+				return true;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (Object.IsValid())
+		{
+			double X = OutVector.X;
+			double Y = OutVector.Y;
+			double Z = OutVector.Z;
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("x"), TEXT("X"), X);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("y"), TEXT("Y"), Y);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("z"), TEXT("Z"), Z);
+			OutVector = FVector(X, Y, Z);
+			return true;
+		}
+		return false;
+	}
+
+	bool TryValueToRotator(const TSharedPtr<FJsonValue>& Value, FRotator& OutRotator)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		if (Value->TryGetArray(Array) && Array && Array->Num() >= 3)
+		{
+			double Pitch = 0.0;
+			double Yaw = 0.0;
+			double Roll = 0.0;
+			if (TryValueToNumber((*Array)[0], Pitch) && TryValueToNumber((*Array)[1], Yaw) && TryValueToNumber((*Array)[2], Roll))
+			{
+				OutRotator = FRotator(Pitch, Yaw, Roll);
+				return true;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (Object.IsValid())
+		{
+			double Pitch = OutRotator.Pitch;
+			double Yaw = OutRotator.Yaw;
+			double Roll = OutRotator.Roll;
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("pitch"), TEXT("Pitch"), Pitch);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("yaw"), TEXT("Yaw"), Yaw);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("roll"), TEXT("Roll"), Roll);
+			OutRotator = FRotator(Pitch, Yaw, Roll);
+			return true;
+		}
+		return false;
+	}
+
+	bool TryValueToLinearColor(const TSharedPtr<FJsonValue>& Value, FLinearColor& OutColor)
+	{
+		if (!Value.IsValid())
+		{
+			return false;
+		}
+
+		const TArray<TSharedPtr<FJsonValue>>* Array = nullptr;
+		if (Value->TryGetArray(Array) && Array && Array->Num() >= 3)
+		{
+			double R = 0.0;
+			double G = 0.0;
+			double B = 0.0;
+			double A = 1.0;
+			if (TryValueToNumber((*Array)[0], R) && TryValueToNumber((*Array)[1], G) && TryValueToNumber((*Array)[2], B))
+			{
+				if (Array->Num() >= 4)
+				{
+					TryValueToNumber((*Array)[3], A);
+				}
+				OutColor = FLinearColor(R, G, B, A);
+				return true;
+			}
+		}
+
+		TSharedPtr<FJsonObject> Object = Value->AsObject();
+		if (Object.IsValid())
+		{
+			double R = OutColor.R;
+			double G = OutColor.G;
+			double B = OutColor.B;
+			double A = OutColor.A;
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("r"), TEXT("R"), R);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("g"), TEXT("G"), G);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("b"), TEXT("B"), B);
+			TryGetNumberFieldCaseInsensitive(Object, TEXT("a"), TEXT("A"), A);
+			OutColor = FLinearColor(R, G, B, A);
+			return true;
+		}
+		return false;
+	}
+
 	AActor* FindActorByNameOrLabel(UWorld* World, const FString& NameOrLabel)
 	{
 		if (!World || NameOrLabel.IsEmpty())
@@ -188,6 +356,260 @@ namespace
 		}
 
 		return ActorClass && ActorClass->IsChildOf(AActor::StaticClass()) ? ActorClass : nullptr;
+	}
+
+	UClass* ResolveObjectClass(const FString& ClassText)
+	{
+		if (ClassText.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		UClass* ObjectClass = FindObject<UClass>(nullptr, *ClassText);
+		if (!ObjectClass)
+		{
+			ObjectClass = LoadObject<UClass>(nullptr, *ClassText);
+		}
+
+		if (!ObjectClass && !ClassText.StartsWith(TEXT("/")))
+		{
+			for (const FString& ModulePath : { TEXT("/Script/Engine."), TEXT("/Script/CoreUObject."), TEXT("/Script/PCG.") })
+			{
+				ObjectClass = FindObject<UClass>(nullptr, *(ModulePath + ClassText));
+				if (!ObjectClass)
+				{
+					ObjectClass = LoadObject<UClass>(nullptr, *(ModulePath + ClassText));
+				}
+				if (ObjectClass)
+				{
+					break;
+				}
+			}
+		}
+
+		return ObjectClass && ObjectClass->IsChildOf(UObject::StaticClass()) ? ObjectClass : nullptr;
+	}
+
+	bool SplitAssetPath(FString InPath, FString& OutPackageName, FString& OutAssetName, FString& OutError)
+	{
+		InPath.TrimStartAndEndInline();
+		if (InPath.IsEmpty())
+		{
+			OutError = TEXT("assetPath is required.");
+			return false;
+		}
+		if (!InPath.StartsWith(TEXT("/Game/")))
+		{
+			OutError = TEXT("assetPath must be under /Game.");
+			return false;
+		}
+
+		if (InPath.Contains(TEXT(".")))
+		{
+			InPath.Split(TEXT("."), &InPath, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromStart);
+		}
+
+		OutPackageName = InPath;
+		OutAssetName = FPaths::GetBaseFilename(InPath);
+		FText PackageNameError;
+		if (OutAssetName.IsEmpty() || !FPackageName::IsValidLongPackageName(OutPackageName, false, &PackageNameError))
+		{
+			if (OutError.IsEmpty())
+			{
+				OutError = PackageNameError.IsEmpty()
+					? TEXT("assetPath is not a valid long package name.")
+					: PackageNameError.ToString();
+			}
+			return false;
+		}
+		return true;
+	}
+
+	bool SavePackages(const TArray<UPackage*>& Packages)
+	{
+		if (Packages.Num() == 0)
+		{
+			return true;
+		}
+
+		TArray<UPackage*> SaveList = Packages;
+		return FEditorFileUtils::PromptForCheckoutAndSave(SaveList, false, false) == FEditorFileUtils::PR_Success;
+	}
+
+	bool SetPropertyFromJson(UObject* Target, FProperty* Property, const TSharedPtr<FJsonValue>& Value, FString& OutError)
+	{
+		if (!Target || !Property)
+		{
+			OutError = TEXT("Target object or property is invalid.");
+			return false;
+		}
+
+		if (!Property->HasAnyPropertyFlags(CPF_Edit | CPF_BlueprintVisible) || Property->HasAnyPropertyFlags(CPF_EditConst | CPF_Transient))
+		{
+			OutError = FString::Printf(TEXT("Property '%s' is not editable through MCP."), *Property->GetName());
+			return false;
+		}
+
+		void* Address = Property->ContainerPtrToValuePtr<void>(Target);
+		if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+		{
+			bool bValue = false;
+			if (!TryValueToBool(Value, bValue))
+			{
+				OutError = TEXT("Expected a boolean value.");
+				return false;
+			}
+			BoolProperty->SetPropertyValue(Address, bValue);
+			return true;
+		}
+		if (FIntProperty* IntProperty = CastField<FIntProperty>(Property))
+		{
+			double Number = 0.0;
+			if (!TryValueToNumber(Value, Number))
+			{
+				OutError = TEXT("Expected a number value.");
+				return false;
+			}
+			IntProperty->SetPropertyValue(Address, static_cast<int32>(Number));
+			return true;
+		}
+		if (FInt64Property* Int64Property = CastField<FInt64Property>(Property))
+		{
+			double Number = 0.0;
+			if (!TryValueToNumber(Value, Number))
+			{
+				OutError = TEXT("Expected a number value.");
+				return false;
+			}
+			Int64Property->SetPropertyValue(Address, static_cast<int64>(Number));
+			return true;
+		}
+		if (FFloatProperty* FloatProperty = CastField<FFloatProperty>(Property))
+		{
+			double Number = 0.0;
+			if (!TryValueToNumber(Value, Number))
+			{
+				OutError = TEXT("Expected a number value.");
+				return false;
+			}
+			FloatProperty->SetPropertyValue(Address, static_cast<float>(Number));
+			return true;
+		}
+		if (FDoubleProperty* DoubleProperty = CastField<FDoubleProperty>(Property))
+		{
+			double Number = 0.0;
+			if (!TryValueToNumber(Value, Number))
+			{
+				OutError = TEXT("Expected a number value.");
+				return false;
+			}
+			DoubleProperty->SetPropertyValue(Address, Number);
+			return true;
+		}
+		if (FEnumProperty* EnumProperty = CastField<FEnumProperty>(Property))
+		{
+			const FString Text = Value.IsValid() ? Value->AsString() : FString();
+			int64 EnumValue = EnumProperty->GetEnum()->GetValueByNameString(Text);
+			if (EnumValue == INDEX_NONE)
+			{
+				double Number = 0.0;
+				if (!TryValueToNumber(Value, Number))
+				{
+					OutError = FString::Printf(TEXT("Unknown enum value '%s'."), *Text);
+					return false;
+				}
+				EnumValue = static_cast<int64>(Number);
+			}
+			EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(Address, EnumValue);
+			return true;
+		}
+		if (FByteProperty* ByteProperty = CastField<FByteProperty>(Property))
+		{
+			double Number = 0.0;
+			if (!TryValueToNumber(Value, Number))
+			{
+				const FString Text = Value.IsValid() ? Value->AsString() : FString();
+				if (ByteProperty->Enum)
+				{
+					const int64 EnumValue = ByteProperty->Enum->GetValueByNameString(Text);
+					if (EnumValue != INDEX_NONE)
+					{
+						ByteProperty->SetPropertyValue(Address, static_cast<uint8>(EnumValue));
+						return true;
+					}
+				}
+				OutError = TEXT("Expected a byte number or enum name.");
+				return false;
+			}
+			ByteProperty->SetPropertyValue(Address, static_cast<uint8>(Number));
+			return true;
+		}
+		if (FStrProperty* StringProperty = CastField<FStrProperty>(Property))
+		{
+			StringProperty->SetPropertyValue(Address, Value.IsValid() ? Value->AsString() : FString());
+			return true;
+		}
+		if (FNameProperty* NameProperty = CastField<FNameProperty>(Property))
+		{
+			NameProperty->SetPropertyValue(Address, FName(*(Value.IsValid() ? Value->AsString() : FString())));
+			return true;
+		}
+		if (FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+		{
+			TextProperty->SetPropertyValue(Address, FText::FromString(Value.IsValid() ? Value->AsString() : FString()));
+			return true;
+		}
+		if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+		{
+			if (StructProperty->Struct == TBaseStructure<FVector>::Get())
+			{
+				FVector Vector = *static_cast<FVector*>(Address);
+				if (!TryValueToVector(Value, Vector))
+				{
+					OutError = TEXT("Expected vector object {x,y,z} or array [x,y,z].");
+					return false;
+				}
+				*static_cast<FVector*>(Address) = Vector;
+				return true;
+			}
+			if (StructProperty->Struct == TBaseStructure<FRotator>::Get())
+			{
+				FRotator Rotator = *static_cast<FRotator*>(Address);
+				if (!TryValueToRotator(Value, Rotator))
+				{
+					OutError = TEXT("Expected rotator object {pitch,yaw,roll} or array [pitch,yaw,roll].");
+					return false;
+				}
+				*static_cast<FRotator*>(Address) = Rotator;
+				return true;
+			}
+			if (StructProperty->Struct == TBaseStructure<FLinearColor>::Get())
+			{
+				FLinearColor Color = *static_cast<FLinearColor*>(Address);
+				if (!TryValueToLinearColor(Value, Color))
+				{
+					OutError = TEXT("Expected color object {r,g,b,a} or array [r,g,b,a].");
+					return false;
+				}
+				*static_cast<FLinearColor*>(Address) = Color;
+				return true;
+			}
+		}
+		if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+		{
+			const FString ObjectPath = Value.IsValid() ? Value->AsString() : FString();
+			UObject* ObjectValue = ObjectPath.IsEmpty() ? nullptr : StaticLoadObject(ObjectProperty->PropertyClass, nullptr, *NormalizeAssetObjectPath(ObjectPath));
+			if (!ObjectPath.IsEmpty() && !ObjectValue)
+			{
+				OutError = FString::Printf(TEXT("Could not load object for property '%s': %s"), *Property->GetName(), *ObjectPath);
+				return false;
+			}
+			ObjectProperty->SetObjectPropertyValue(Address, ObjectValue);
+			return true;
+		}
+
+		OutError = FString::Printf(TEXT("Property type for '%s' is not supported yet."), *Property->GetName());
+		return false;
 	}
 
 	FString MobilityToString(EComponentMobility::Type Mobility)
@@ -599,6 +1021,560 @@ namespace WorldDataMCP
 			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 			Result->SetObjectField(TEXT("actor"), MakeActorObject(Actor));
 			return SuccessJson(Result);
+		}
+
+		FString TransformActor(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString Name;
+			if (!Args->TryGetStringField(TEXT("name"), Name) && !Args->TryGetStringField(TEXT("label"), Name))
+			{
+				return ErrorJson(TEXT("Missing required field 'name'."));
+			}
+
+			UWorld* World = GetEditorWorld();
+			AActor* Actor = FindActorByNameOrLabel(World, Name);
+			if (!Actor)
+			{
+				return ErrorJson(FString::Printf(TEXT("Actor not found: %s"), *Name));
+			}
+
+			FVector Location = Actor->GetActorLocation();
+			FRotator Rotation = Actor->GetActorRotation();
+			FVector Scale = Actor->GetActorScale3D();
+			const bool bHasLocation = TryGetVectorField(Args, TEXT("location"), Location);
+			const bool bHasRotation = TryGetRotatorField(Args, TEXT("rotation"), Rotation);
+			const bool bHasScale = TryGetVectorField(Args, TEXT("scale"), Scale);
+			if (!bHasLocation && !bHasRotation && !bHasScale)
+			{
+				return ErrorJson(TEXT("Provide at least one of location, rotation, or scale."));
+			}
+
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "TransformActor", "MCP Transform Actor"));
+			Actor->Modify();
+			if (bHasLocation || bHasRotation)
+			{
+				Actor->SetActorLocationAndRotation(Location, Rotation);
+			}
+			if (bHasScale)
+			{
+				Actor->SetActorScale3D(Scale);
+			}
+			Actor->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetObjectField(TEXT("actor"), MakeActorObject(Actor));
+			return SuccessJson(Result);
+		}
+
+		FString DeleteActor(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString Name;
+			if (!Args->TryGetStringField(TEXT("name"), Name) && !Args->TryGetStringField(TEXT("label"), Name))
+			{
+				return ErrorJson(TEXT("Missing required field 'name'."));
+			}
+
+			UWorld* World = GetEditorWorld();
+			AActor* Actor = FindActorByNameOrLabel(World, Name);
+			if (!World || !Actor)
+			{
+				return ErrorJson(FString::Printf(TEXT("Actor not found: %s"), *Name));
+			}
+
+			TSharedPtr<FJsonObject> ActorBeforeDelete = MakeActorObject(Actor);
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "DeleteActor", "MCP Delete Actor"));
+			World->Modify();
+			Actor->Modify();
+			if (GEditor)
+			{
+				GEditor->SelectActor(Actor, false, false);
+			}
+			const bool bDestroyed = World->EditorDestroyActor(Actor, true);
+			World->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("deleted"), bDestroyed);
+			Result->SetObjectField(TEXT("actor"), ActorBeforeDelete);
+			return bDestroyed ? SuccessJson(Result) : ErrorJson(TEXT("EditorDestroyActor failed."));
+		}
+
+		FString AttachActor(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString ChildName;
+			if (!Args->TryGetStringField(TEXT("child"), ChildName)
+				&& !Args->TryGetStringField(TEXT("childName"), ChildName)
+				&& !Args->TryGetStringField(TEXT("name"), ChildName))
+			{
+				return ErrorJson(TEXT("Missing required field 'child'."));
+			}
+
+			FString ParentName;
+			if (!Args->TryGetStringField(TEXT("parent"), ParentName)
+				&& !Args->TryGetStringField(TEXT("parentName"), ParentName))
+			{
+				return ErrorJson(TEXT("Missing required field 'parent'."));
+			}
+
+			UWorld* World = GetEditorWorld();
+			AActor* Child = FindActorByNameOrLabel(World, ChildName);
+			AActor* Parent = FindActorByNameOrLabel(World, ParentName);
+			if (!Child)
+			{
+				return ErrorJson(FString::Printf(TEXT("Child actor not found: %s"), *ChildName));
+			}
+			if (!Parent)
+			{
+				return ErrorJson(FString::Printf(TEXT("Parent actor not found: %s"), *ParentName));
+			}
+			if (Child == Parent)
+			{
+				return ErrorJson(TEXT("An actor cannot be attached to itself."));
+			}
+
+			bool bKeepWorldTransform = true;
+			Args->TryGetBoolField(TEXT("keepWorldTransform"), bKeepWorldTransform);
+
+			FString Socket;
+			Args->TryGetStringField(TEXT("socket"), Socket);
+
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "AttachActor", "MCP Attach Actor"));
+			Child->Modify();
+			Parent->Modify();
+			const FAttachmentTransformRules Rules = bKeepWorldTransform
+				? FAttachmentTransformRules::KeepWorldTransform
+				: FAttachmentTransformRules::KeepRelativeTransform;
+			const bool bAttached = Child->AttachToActor(Parent, Rules, Socket.IsEmpty() ? NAME_None : FName(*Socket));
+			Child->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("attached"), bAttached);
+			Result->SetObjectField(TEXT("child"), MakeActorObject(Child));
+			Result->SetObjectField(TEXT("parent"), MakeActorObject(Parent));
+			return bAttached ? SuccessJson(Result) : ErrorJson(TEXT("AttachToActor failed."));
+		}
+
+		FString SetActorProperty(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString Name;
+			if (!Args->TryGetStringField(TEXT("name"), Name) && !Args->TryGetStringField(TEXT("label"), Name))
+			{
+				return ErrorJson(TEXT("Missing required field 'name'."));
+			}
+
+			FString PropertyName;
+			if (!Args->TryGetStringField(TEXT("property"), PropertyName))
+			{
+				return ErrorJson(TEXT("Missing required field 'property'."));
+			}
+
+			const TSharedPtr<FJsonValue> Value = Args->TryGetField(TEXT("value"));
+			if (!Value.IsValid())
+			{
+				return ErrorJson(TEXT("Missing required field 'value'."));
+			}
+
+			UWorld* World = GetEditorWorld();
+			AActor* Actor = FindActorByNameOrLabel(World, Name);
+			if (!Actor)
+			{
+				return ErrorJson(FString::Printf(TEXT("Actor not found: %s"), *Name));
+			}
+
+			UObject* Target = Actor;
+			FString ComponentName;
+			if (Args->TryGetStringField(TEXT("component"), ComponentName) && !ComponentName.IsEmpty())
+			{
+				Target = nullptr;
+				TInlineComponentArray<UActorComponent*> Components(Actor);
+				for (UActorComponent* Component : Components)
+				{
+					if (IsValid(Component)
+						&& (Component->GetName().Equals(ComponentName, ESearchCase::IgnoreCase)
+							|| Component->GetClass()->GetName().Equals(ComponentName, ESearchCase::IgnoreCase)))
+					{
+						Target = Component;
+						break;
+					}
+				}
+				if (!Target)
+				{
+					return ErrorJson(FString::Printf(TEXT("Component not found on actor '%s': %s"), *Name, *ComponentName));
+				}
+			}
+
+			FProperty* Property = Target->GetClass()->FindPropertyByName(FName(*PropertyName));
+			if (!Property)
+			{
+				return ErrorJson(FString::Printf(TEXT("Property '%s' was not found on %s."), *PropertyName, *Target->GetName()));
+			}
+
+			FString Error;
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "SetActorProperty", "MCP Set Actor Property"));
+			Target->Modify();
+			Target->PreEditChange(Property);
+			if (!SetPropertyFromJson(Target, Property, Value, Error))
+			{
+				return ErrorJson(Error);
+			}
+			FPropertyChangedEvent ChangeEvent(Property);
+			Target->PostEditChangeProperty(ChangeEvent);
+			Target->MarkPackageDirty();
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("target"), Target->GetPathName());
+			Result->SetStringField(TEXT("property"), PropertyName);
+			Result->SetObjectField(TEXT("actor"), MakeActorObject(Actor));
+			return SuccessJson(Result);
+		}
+
+		FString SaveCurrentLevel(const TSharedPtr<FJsonObject>& Args)
+		{
+			UWorld* World = GetEditorWorld();
+			if (!World)
+			{
+				return ErrorJson(TEXT("Editor world is not available."));
+			}
+
+			UPackage* Package = World->GetOutermost();
+			TArray<UPackage*> PackagesToSave;
+			PackagesToSave.Add(Package);
+			const bool bSaved = SavePackages(PackagesToSave);
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetBoolField(TEXT("saved"), bSaved);
+			Result->SetStringField(TEXT("levelPackage"), Package ? Package->GetName() : FString());
+			return bSaved ? SuccessJson(Result) : ErrorJson(TEXT("Failed to save current level package."));
+		}
+
+		FString CreateAsset(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString AssetPath;
+			if (!Args->TryGetStringField(TEXT("assetPath"), AssetPath) && !Args->TryGetStringField(TEXT("path"), AssetPath))
+			{
+				return ErrorJson(TEXT("Missing required field 'assetPath'."));
+			}
+
+			FString ClassText = TEXT("DataAsset");
+			Args->TryGetStringField(TEXT("class"), ClassText);
+			UClass* AssetClass = ResolveObjectClass(ClassText);
+			if (!AssetClass || AssetClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+			{
+				return ErrorJson(FString::Printf(TEXT("Asset class not found or not instantiable: %s"), *ClassText));
+			}
+
+			FString PackageName;
+			FString AssetName;
+			FString Error;
+			if (!SplitAssetPath(AssetPath, PackageName, AssetName, Error))
+			{
+				return ErrorJson(Error);
+			}
+
+			if (StaticFindObject(UObject::StaticClass(), nullptr, *NormalizeAssetObjectPath(PackageName)))
+			{
+				return ErrorJson(FString::Printf(TEXT("Asset already exists: %s"), *PackageName));
+			}
+
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "CreateAsset", "MCP Create Asset"));
+			UPackage* Package = CreatePackage(*PackageName);
+			if (!Package)
+			{
+				return ErrorJson(FString::Printf(TEXT("Failed to create package: %s"), *PackageName));
+			}
+			Package->FullyLoad();
+
+			UObject* Asset = NewObject<UObject>(Package, AssetClass, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
+			if (!Asset)
+			{
+				return ErrorJson(FString::Printf(TEXT("Failed to create asset object: %s"), *AssetName));
+			}
+
+			FAssetRegistryModule::AssetCreated(Asset);
+			Package->MarkPackageDirty();
+
+			bool bSave = false;
+			Args->TryGetBoolField(TEXT("save"), bSave);
+			bool bSaved = false;
+			if (bSave)
+			{
+				TArray<UPackage*> PackagesToSave;
+				PackagesToSave.Add(Package);
+				bSaved = SavePackages(PackagesToSave);
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("assetPath"), Asset->GetPathName());
+			Result->SetStringField(TEXT("packageName"), PackageName);
+			Result->SetStringField(TEXT("class"), AssetClass->GetName());
+			Result->SetBoolField(TEXT("saved"), bSaved);
+			return SuccessJson(Result);
+		}
+
+		FString CreateBlueprintAsset(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString AssetPath;
+			if (!Args->TryGetStringField(TEXT("assetPath"), AssetPath) && !Args->TryGetStringField(TEXT("path"), AssetPath))
+			{
+				return ErrorJson(TEXT("Missing required field 'assetPath'."));
+			}
+
+			FString ParentClassText = TEXT("Actor");
+			Args->TryGetStringField(TEXT("parentClass"), ParentClassText);
+			UClass* ParentClass = ResolveObjectClass(ParentClassText);
+			if (!ParentClass)
+			{
+				return ErrorJson(FString::Printf(TEXT("Parent class not found: %s"), *ParentClassText));
+			}
+
+			FString PackageName;
+			FString AssetName;
+			FString Error;
+			if (!SplitAssetPath(AssetPath, PackageName, AssetName, Error))
+			{
+				return ErrorJson(Error);
+			}
+			if (StaticFindObject(UObject::StaticClass(), nullptr, *NormalizeAssetObjectPath(PackageName)))
+			{
+				return ErrorJson(FString::Printf(TEXT("Asset already exists: %s"), *PackageName));
+			}
+
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "CreateBlueprintAsset", "MCP Create Blueprint Asset"));
+			UPackage* Package = CreatePackage(*PackageName);
+			if (!Package)
+			{
+				return ErrorJson(FString::Printf(TEXT("Failed to create package: %s"), *PackageName));
+			}
+
+			UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+				ParentClass,
+				Package,
+				FName(*AssetName),
+				BPTYPE_Normal,
+				UBlueprint::StaticClass(),
+				UBlueprintGeneratedClass::StaticClass());
+			if (!Blueprint)
+			{
+				return ErrorJson(TEXT("Failed to create Blueprint asset."));
+			}
+
+			FAssetRegistryModule::AssetCreated(Blueprint);
+			Package->MarkPackageDirty();
+
+			bool bSave = false;
+			Args->TryGetBoolField(TEXT("save"), bSave);
+			bool bSaved = false;
+			if (bSave)
+			{
+				TArray<UPackage*> PackagesToSave;
+				PackagesToSave.Add(Package);
+				bSaved = SavePackages(PackagesToSave);
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("assetPath"), Blueprint->GetPathName());
+			Result->SetStringField(TEXT("packageName"), PackageName);
+			Result->SetStringField(TEXT("parentClass"), ParentClass->GetName());
+			Result->SetBoolField(TEXT("saved"), bSaved);
+			Result->SetStringField(TEXT("note"), TEXT("Blueprint asset creation is supported; graph node construction is not exposed yet."));
+			return SuccessJson(Result);
+		}
+
+		FString ModifyMaterialInstance(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString AssetPath;
+			if (!Args->TryGetStringField(TEXT("assetPath"), AssetPath) && !Args->TryGetStringField(TEXT("path"), AssetPath))
+			{
+				return ErrorJson(TEXT("Missing required field 'assetPath'."));
+			}
+
+			UMaterialInstanceConstant* MaterialInstance = LoadObject<UMaterialInstanceConstant>(nullptr, *NormalizeAssetObjectPath(AssetPath));
+			if (!MaterialInstance)
+			{
+				return ErrorJson(FString::Printf(TEXT("MaterialInstanceConstant not found: %s"), *AssetPath));
+			}
+
+			int32 ChangedCount = 0;
+			FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "ModifyMaterialInstance", "MCP Modify Material Instance"));
+			MaterialInstance->Modify();
+
+			const TSharedPtr<FJsonObject>* ScalarParams = nullptr;
+			if (Args->TryGetObjectField(TEXT("scalarParameters"), ScalarParams) && ScalarParams && ScalarParams->IsValid())
+			{
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*ScalarParams)->Values)
+				{
+					double Number = 0.0;
+					if (!TryValueToNumber(Pair.Value, Number))
+					{
+						return ErrorJson(FString::Printf(TEXT("Scalar parameter '%s' must be numeric."), *Pair.Key));
+					}
+					MaterialInstance->SetScalarParameterValueEditorOnly(FName(*Pair.Key), static_cast<float>(Number));
+					++ChangedCount;
+				}
+			}
+
+			const TSharedPtr<FJsonObject>* VectorParams = nullptr;
+			if (Args->TryGetObjectField(TEXT("vectorParameters"), VectorParams) && VectorParams && VectorParams->IsValid())
+			{
+				for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : (*VectorParams)->Values)
+				{
+					FLinearColor Color = FLinearColor::White;
+					if (!TryValueToLinearColor(Pair.Value, Color))
+					{
+						return ErrorJson(FString::Printf(TEXT("Vector parameter '%s' must be {r,g,b,a} or [r,g,b,a]."), *Pair.Key));
+					}
+					MaterialInstance->SetVectorParameterValueEditorOnly(FName(*Pair.Key), Color);
+					++ChangedCount;
+				}
+			}
+
+			MaterialInstance->PostEditChange();
+			MaterialInstance->MarkPackageDirty();
+
+			bool bSave = false;
+			Args->TryGetBoolField(TEXT("save"), bSave);
+			bool bSaved = false;
+			if (bSave)
+			{
+				TArray<UPackage*> PackagesToSave;
+				PackagesToSave.Add(MaterialInstance->GetOutermost());
+				bSaved = SavePackages(PackagesToSave);
+			}
+
+			TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+			Result->SetStringField(TEXT("assetPath"), MaterialInstance->GetPathName());
+			Result->SetNumberField(TEXT("changedCount"), ChangedCount);
+			Result->SetBoolField(TEXT("saved"), bSaved);
+			return SuccessJson(Result);
+		}
+
+		FString CreatePcgGraphFromRecipe(const TSharedPtr<FJsonObject>& Args)
+		{
+			FString AssetPath;
+			if (!Args->TryGetStringField(TEXT("assetPath"), AssetPath) && !Args->TryGetStringField(TEXT("path"), AssetPath))
+			{
+				return ErrorJson(TEXT("Missing required field 'assetPath'."));
+			}
+
+			bool bSave = false;
+			Args->TryGetBoolField(TEXT("save"), bSave);
+
+			FString RecipeId;
+			Args->TryGetStringField(TEXT("recipe_id"), RecipeId);
+			if (RecipeId.IsEmpty())
+			{
+				Args->TryGetStringField(TEXT("id"), RecipeId);
+			}
+
+			FString SourceGraph;
+			if (!Args->TryGetStringField(TEXT("sourceGraph"), SourceGraph))
+			{
+				Args->TryGetStringField(TEXT("source_graph"), SourceGraph);
+			}
+			const TSharedPtr<FJsonObject>* RecipeObject = nullptr;
+			if (SourceGraph.IsEmpty() && Args->TryGetObjectField(TEXT("recipe"), RecipeObject) && RecipeObject && RecipeObject->IsValid())
+			{
+				if (!(*RecipeObject)->TryGetStringField(TEXT("source_graph"), SourceGraph))
+				{
+					(*RecipeObject)->TryGetStringField(TEXT("sourceGraph"), SourceGraph);
+				}
+				if (RecipeId.IsEmpty())
+				{
+					if (!(*RecipeObject)->TryGetStringField(TEXT("recipe_id"), RecipeId))
+					{
+						(*RecipeObject)->TryGetStringField(TEXT("id"), RecipeId);
+					}
+				}
+			}
+
+			if (!SourceGraph.IsEmpty())
+			{
+				UObject* SourceObject = StaticLoadObject(UObject::StaticClass(), nullptr, *NormalizeAssetObjectPath(SourceGraph));
+				if (!SourceObject)
+				{
+					return ErrorJson(FString::Printf(TEXT("sourceGraph could not be loaded: %s"), *SourceGraph));
+				}
+				if (!SourceObject->GetClass()->GetName().Contains(TEXT("PCGGraph"), ESearchCase::IgnoreCase))
+				{
+					return ErrorJson(FString::Printf(TEXT("sourceGraph is not a PCGGraph asset: %s"), *SourceObject->GetPathName()));
+				}
+
+				FString PackageName;
+				FString AssetName;
+				FString Error;
+				if (!SplitAssetPath(AssetPath, PackageName, AssetName, Error))
+				{
+					return ErrorJson(Error);
+				}
+				if (StaticFindObject(UObject::StaticClass(), nullptr, *NormalizeAssetObjectPath(PackageName)))
+				{
+					return ErrorJson(FString::Printf(TEXT("Asset already exists: %s"), *PackageName));
+				}
+
+				FScopedTransaction Transaction(NSLOCTEXT("UEBridgeMCP", "CreatePcgGraphFromRecipe", "MCP Create PCG Graph From Recipe"));
+				UPackage* Package = CreatePackage(*PackageName);
+				if (!Package)
+				{
+					return ErrorJson(FString::Printf(TEXT("Failed to create package: %s"), *PackageName));
+				}
+				Package->FullyLoad();
+
+				UObject* DuplicatedGraph = StaticDuplicateObject(SourceObject, Package, FName(*AssetName));
+				if (!DuplicatedGraph)
+				{
+					return ErrorJson(TEXT("Failed to duplicate source PCG graph."));
+				}
+				DuplicatedGraph->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+				DuplicatedGraph->ClearFlags(RF_Transient);
+				FAssetRegistryModule::AssetCreated(DuplicatedGraph);
+				Package->MarkPackageDirty();
+
+				bool bSaved = false;
+				if (bSave)
+				{
+					TArray<UPackage*> PackagesToSave;
+					PackagesToSave.Add(Package);
+					bSaved = SavePackages(PackagesToSave);
+				}
+
+				TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+				Result->SetBoolField(TEXT("success"), true);
+				Result->SetStringField(TEXT("assetPath"), DuplicatedGraph->GetPathName());
+				Result->SetStringField(TEXT("packageName"), PackageName);
+				Result->SetStringField(TEXT("sourceGraph"), SourceObject->GetPathName());
+				Result->SetStringField(TEXT("recipeId"), RecipeId);
+				Result->SetBoolField(TEXT("recipeApplied"), true);
+				Result->SetStringField(TEXT("buildMethod"), TEXT("duplicated_source_graph"));
+				Result->SetBoolField(TEXT("sceneBindingApplied"), false);
+				Result->SetBoolField(TEXT("saved"), bSaved);
+				Result->SetStringField(TEXT("note"), TEXT("Duplicated the recipe source_graph PCGGraph. Scene input binding and generated node synthesis are still separate steps."));
+				return JsonObjectToString(Result);
+			}
+
+			TSharedPtr<FJsonObject> CreateArgs = MakeShared<FJsonObject>();
+			CreateArgs->SetStringField(TEXT("assetPath"), AssetPath);
+			CreateArgs->SetStringField(TEXT("class"), TEXT("PCGGraph"));
+			CreateArgs->SetBoolField(TEXT("save"), bSave);
+
+			FString Created = CreateAsset(CreateArgs);
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Created);
+			TSharedPtr<FJsonObject> Result;
+			if (!FJsonSerializer::Deserialize(Reader, Result) || !Result.IsValid())
+			{
+				return Created;
+			}
+
+			bool bSuccess = true;
+			if (Result->TryGetBoolField(TEXT("success"), bSuccess) && !bSuccess)
+			{
+				return Created;
+			}
+
+			Result->SetStringField(TEXT("recipeId"), RecipeId);
+			Result->SetBoolField(TEXT("recipeApplied"), false);
+			Result->SetStringField(TEXT("buildMethod"), TEXT("empty_pcg_graph_asset"));
+			Result->SetBoolField(TEXT("sceneBindingApplied"), false);
+			Result->SetStringField(TEXT("note"), TEXT("Created a PCGGraph asset container because no sourceGraph/source_graph was supplied. Recipe-to-node graph synthesis and scene binding are not implemented in this plugin yet."));
+			return JsonObjectToString(Result.ToSharedRef());
 		}
 
 		FString GetSelectedActors(const TSharedPtr<FJsonObject>& Args)

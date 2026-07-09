@@ -24,6 +24,13 @@ struct FWorldDataAcpPermissionRequest
 	TArray<FWorldDataAcpPermissionOption> Options;
 };
 
+struct FWorldDataCodexAcpLaunchSpec
+{
+	FString Executable;
+	FString Arguments;
+	FString DisplayPath;
+};
+
 DECLARE_DELEGATE_OneParam(FWorldDataAcpTextDelegate, const FString&);
 DECLARE_DELEGATE_OneParam(FWorldDataAcpStatusDelegate, const FString&);
 DECLARE_DELEGATE_OneParam(FWorldDataAcpErrorDelegate, const FString&);
@@ -74,7 +81,7 @@ private:
 	void HandleMethod(const FString& Method, const TSharedPtr<FJsonObject>& Message);
 	void HandleSessionUpdate(const FString& AcpSessionId, const TSharedPtr<FJsonObject>& Update);
 
-	FString FindAdapterBinary() const;
+	bool FindAdapterLaunch(FWorldDataCodexAcpLaunchSpec& OutLaunchSpec) const;
 	FString ResolveOnPath(const FString& Command) const;
 	FString JsonToString(const TSharedPtr<FJsonObject>& Object) const;
 	void Fail(const FString& Message);
@@ -86,6 +93,7 @@ private:
 	FString SessionId;
 	FString PendingPrompt;
 	FString LastError;
+	FString ActiveAdapterDisplayPath;
 	EWorldDataCodexPermissionMode PermissionMode = EWorldDataCodexPermissionMode::Default;
 
 	int32 NextRpcId = 1;

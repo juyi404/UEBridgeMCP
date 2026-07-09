@@ -19,6 +19,15 @@ namespace WorldDataMCP
 		FString ReadAsset(const TSharedPtr<FJsonObject>& Args);
 		FString SelectActor(const TSharedPtr<FJsonObject>& Args);
 		FString SpawnActor(const TSharedPtr<FJsonObject>& Args);
+		FString TransformActor(const TSharedPtr<FJsonObject>& Args);
+		FString DeleteActor(const TSharedPtr<FJsonObject>& Args);
+		FString AttachActor(const TSharedPtr<FJsonObject>& Args);
+		FString SetActorProperty(const TSharedPtr<FJsonObject>& Args);
+		FString SaveCurrentLevel(const TSharedPtr<FJsonObject>& Args);
+		FString CreateAsset(const TSharedPtr<FJsonObject>& Args);
+		FString CreateBlueprintAsset(const TSharedPtr<FJsonObject>& Args);
+		FString ModifyMaterialInstance(const TSharedPtr<FJsonObject>& Args);
+		FString CreatePcgGraphFromRecipe(const TSharedPtr<FJsonObject>& Args);
 		FString GetBootstrapContextJson();
 	}
 }

@@ -33,6 +33,7 @@ namespace ExtractedTools
 namespace
 {
 	constexpr int32 MaxFileReadBytes = 1024 * 1024;
+	constexpr int32 MaxPythonCommandBytes = 64 * 1024;
 	constexpr int32 MaxSourceFiles = 400;
 	constexpr int32 MaxResourceRows = 300;
 
@@ -103,6 +104,86 @@ namespace
 
 		OutPath = Candidate;
 		return true;
+	}
+
+	FString NormalizeDirectoryForContainment(FString Directory)
+	{
+		Directory = FPaths::ConvertRelativePathToFull(Directory);
+		FPaths::NormalizeDirectoryName(Directory);
+		return Directory;
+	}
+
+	FString NormalizeFileForContainment(FString File)
+	{
+		File = FPaths::ConvertRelativePathToFull(File);
+		FPaths::NormalizeFilename(File);
+		return File;
+	}
+
+	bool IsPathInsideDirectory(const FString& File, const FString& Directory)
+	{
+		const FString NormalizedFile = NormalizeFileForContainment(File);
+		const FString NormalizedDirectory = NormalizeDirectoryForContainment(Directory);
+		return NormalizedFile.StartsWith(NormalizedDirectory + TEXT("/"), ESearchCase::IgnoreCase);
+	}
+
+	bool ValidateReadableJsonFileWithinRoot(const FString& CandidatePath, const FString& AllowedRoot, FString& OutPath, FString& OutError)
+	{
+		if (CandidatePath.IsEmpty())
+		{
+			OutError = TEXT("File path is empty.");
+			return false;
+		}
+
+		const FString NormalizedFile = NormalizeFileForContainment(CandidatePath);
+		if (!IsPathInsideDirectory(NormalizedFile, AllowedRoot))
+		{
+			OutError = FString::Printf(TEXT("Path is outside the allowed PCG recipe root: %s"), *MakeProjectRelative(NormalizedFile));
+			return false;
+		}
+		if (!FPaths::GetExtension(NormalizedFile, false).Equals(TEXT("json"), ESearchCase::IgnoreCase))
+		{
+			OutError = TEXT("Only .json PCG recipe files can be read.");
+			return false;
+		}
+		if (!IFileManager::Get().FileExists(*NormalizedFile))
+		{
+			OutError = FString::Printf(TEXT("File does not exist: %s"), *MakeProjectRelative(NormalizedFile));
+			return false;
+		}
+
+		const int64 FileSize = IFileManager::Get().FileSize(*NormalizedFile);
+		if (FileSize < 0)
+		{
+			OutError = FString::Printf(TEXT("Unable to stat file: %s"), *MakeProjectRelative(NormalizedFile));
+			return false;
+		}
+		if (FileSize > MaxFileReadBytes)
+		{
+			OutError = FString::Printf(TEXT("File is larger than the %d byte read limit."), MaxFileReadBytes);
+			return false;
+		}
+
+		OutPath = NormalizedFile;
+		return true;
+	}
+
+	bool ResolvePcgJsonFilePath(const FString& FileArg, const FString& FallbackRoot, const FString& AllowedRoot, FString& OutPath, FString& OutError)
+	{
+		if (FileArg.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("file is required.");
+			return false;
+		}
+
+		FString Candidate;
+		FString ProjectPathError;
+		if (!ResolveProjectFilePath(FileArg, Candidate, ProjectPathError))
+		{
+			Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(FallbackRoot, FileArg));
+		}
+
+		return ValidateReadableJsonFileWithinRoot(Candidate, AllowedRoot, OutPath, OutError);
 	}
 
 	double GetNumberField(const TSharedPtr<FJsonObject>& Args, const TCHAR* FieldName, double DefaultValue)
@@ -409,6 +490,8 @@ namespace
 	{
 		const FString UEBridgeRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP"), TEXT("pcg_tool"), TEXT("recipe_library")));
 		OutRoots.Add(UEBridgeRoot);
+		OutRoots.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Nwiro"), TEXT("pcg_tool"), TEXT("recipe_library"))));
+		OutRoots.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("PCGRecipeLibrary"))));
 	}
 
 	FString GetActiveRecipeRoot()
@@ -495,6 +578,20 @@ namespace
 
 	FString ReadJsonFileAsResult(const FString& File, const FString& FieldName)
 	{
+		if (!FPaths::GetExtension(File, false).Equals(TEXT("json"), ESearchCase::IgnoreCase))
+		{
+			return ErrorJson(TEXT("Only .json files can be read by this helper."));
+		}
+		const int64 FileSize = IFileManager::Get().FileSize(*File);
+		if (FileSize < 0)
+		{
+			return ErrorJson(FString::Printf(TEXT("Unable to stat file: %s"), *File));
+		}
+		if (FileSize > MaxFileReadBytes)
+		{
+			return ErrorJson(FString::Printf(TEXT("File is larger than the %d byte read limit."), MaxFileReadBytes));
+		}
+
 		FString Content;
 		if (!FFileHelper::LoadFileToString(Content, *File))
 		{
@@ -524,7 +621,7 @@ FString GetToolDefinitionsJson()
 {"name":"list_resources","description":"List UEBridgeMCP standalone resources using ubridge:// URIs.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"List Resources","readOnlyHint":true,"openWorldHint":false}},
 {"name":"read_resource","description":"Read a UEBridgeMCP standalone resource by URI. Recommended first read: ubridge://context/bootstrap.","inputSchema":{"type":"object","properties":{"uri":{"type":"string"}},"required":["uri"]},"annotations":{"title":"Read Resource","readOnlyHint":true,"openWorldHint":false}},
 {"name":"read_log","description":"Read recent Unreal log lines from the project Saved/Logs folder. Supports lines, severity, and category filters.","inputSchema":{"type":"object","properties":{"lines":{"type":"number","description":"Number of lines. Default 50."},"severity":{"type":"string","description":"Filter: Error, Warning, Log."},"category":{"type":"string"}}},"annotations":{"title":"Read Log","readOnlyHint":true,"openWorldHint":false}},
-{"name":"execute_python","description":"Execute Python code in the Unreal Editor through PythonScriptPlugin.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."}},"required":["code"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}},
+{"name":"execute_python","description":"Execute Python code in the Unreal Editor through PythonScriptPlugin. Requires unsafe_confirm exactly equal to 'I understand this runs arbitrary Unreal Python'. Prefer structured UE tools first.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."},"unsafe_confirm":{"type":"string","description":"Must equal: I understand this runs arbitrary Unreal Python"}},"required":["code","unsafe_confirm"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":true,"openWorldHint":true}},
 {"name":"search_assets","description":"Search project assets by name, path, and optional class filter.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"classFilter":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Search Assets","readOnlyHint":true,"openWorldHint":false}},
 {"name":"find_static_meshes","description":"Search StaticMesh assets for placement or PCG use.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Find Static Meshes","readOnlyHint":true,"openWorldHint":false}},
 {"name":"get_level_actors","description":"UEBridgeMCP alias for listing current editor level actors.","inputSchema":{"type":"object","properties":{"classFilter":{"type":"string"},"nameContains":{"type":"string"},"selectedOnly":{"type":"boolean"},"maxResults":{"type":"number"}}},"annotations":{"title":"Get Level Actors","readOnlyHint":true,"openWorldHint":false}},
@@ -704,6 +801,16 @@ FString ExecutePython(const TSharedPtr<FJsonObject>& Args)
 	if (Code.IsEmpty())
 	{
 		return ErrorJson(TEXT("code is required."));
+	}
+	if (Code.Len() > MaxPythonCommandBytes)
+	{
+		return ErrorJson(FString::Printf(TEXT("Python code exceeds the %d character limit."), MaxPythonCommandBytes));
+	}
+
+	const FString UnsafeConfirm = GetStringField(Args, TEXT("unsafe_confirm"));
+	if (UnsafeConfirm != TEXT("I understand this runs arbitrary Unreal Python"))
+	{
+		return ErrorJson(TEXT("execute_python requires unsafe_confirm exactly equal to 'I understand this runs arbitrary Unreal Python'. Prefer structured UEBridgeMCP tools when possible."));
 	}
 
 	IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
@@ -1053,25 +1160,29 @@ FString ReadPcgRecipe(const TSharedPtr<FJsonObject>& Args)
 
 	FString FullPath;
 	FString Error;
+	const FString ActiveRoot = GetActiveRecipeRoot();
 	if (!FileArg.IsEmpty())
 	{
-		if (!ResolveProjectFilePath(FileArg, FullPath, Error))
+		if (!ResolvePcgJsonFilePath(FileArg, ActiveRoot, ActiveRoot, FullPath, Error))
 		{
-			const FString ActiveRoot = GetActiveRecipeRoot();
-			FullPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(ActiveRoot, FileArg));
+			return ErrorJson(Error);
 		}
 	}
 	else
 	{
 		TArray<FString> Files;
-		FindJsonFilesRecursive(GetActiveRecipeRoot(), Files);
+		FindJsonFilesRecursive(ActiveRoot, Files);
 		FullPath = FindJsonFileByIdOrName(Id, Files);
+		if (FullPath.IsEmpty())
+		{
+			return ErrorJson(TEXT("PCG recipe was not found."));
+		}
+		if (!ValidateReadableJsonFileWithinRoot(FullPath, ActiveRoot, FullPath, Error))
+		{
+			return ErrorJson(Error);
+		}
 	}
 
-	if (FullPath.IsEmpty() || !IFileManager::Get().FileExists(*FullPath))
-	{
-		return ErrorJson(TEXT("PCG recipe was not found."));
-	}
 	return ReadJsonFileAsResult(FullPath, TEXT("recipe"));
 }
 
@@ -1084,25 +1195,30 @@ FString ReadPcgSceneBinding(const TSharedPtr<FJsonObject>& Args)
 
 	FString FullPath;
 	FString Error;
+	const FString ActiveRoot = GetActiveRecipeRoot();
+	const FString PcgRoot = FPaths::GetPath(ActiveRoot);
 	if (!FileArg.IsEmpty())
 	{
-		if (!ResolveProjectFilePath(FileArg, FullPath, Error))
+		if (!ResolvePcgJsonFilePath(FileArg, ActiveRoot, ActiveRoot, FullPath, Error))
 		{
-			FullPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(GetActiveRecipeRoot(), FileArg));
+			return ErrorJson(Error);
 		}
 	}
 	else
 	{
 		TArray<FString> Files;
-		const FString PcgRoot = FPaths::GetPath(GetActiveRecipeRoot());
 		FindJsonFilesRecursive(PcgRoot, Files);
 		FullPath = FindJsonFileByIdOrName(Wanted, Files);
+		if (FullPath.IsEmpty())
+		{
+			return ErrorJson(TEXT("PCG scene binding was not found."));
+		}
+		if (!ValidateReadableJsonFileWithinRoot(FullPath, PcgRoot, FullPath, Error))
+		{
+			return ErrorJson(Error);
+		}
 	}
 
-	if (FullPath.IsEmpty() || !IFileManager::Get().FileExists(*FullPath))
-	{
-		return ErrorJson(TEXT("PCG scene binding was not found."));
-	}
 	return ReadJsonFileAsResult(FullPath, TEXT("sceneBinding"));
 }
 }

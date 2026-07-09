@@ -239,6 +239,13 @@ private:
 						.VAlign(VAlign_Center)
 						.Padding(0.0f, 0.0f, 6.0f, 0.0f)
 						[
+							BuildToolbarButton(LOCTEXT("SetupCliTopButton", "一键配置 CLI"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnSetupCliClicked))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+						[
 							BuildToolbarButton(LOCTEXT("RefreshTopButton", "刷新"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnRefreshClicked), TAttribute<bool>::CreateLambda([] { return FWorldDataMCPServer::IsRunning(); }))
 						]
 						+ SHorizontalBox::Slot()
@@ -1898,7 +1905,7 @@ private:
 	FText GetCliDescription(ECliTool Tool) const
 	{
 		return Tool == ECliTool::Codex
-			? LOCTEXT("CodexCliDescription", "配置 codex 命令路径；当前面板对话仍通过 codex-acp 适配器接入。")
+			? LOCTEXT("CodexCliDescription", "配置 codex 命令路径；MCP 连接已自动写入 ~/.codex/config.toml（面板对话仍通过 codex-acp 适配器接入）。")
 			: LOCTEXT("CursorCliDescription", "配置 Cursor Agent CLI（cursor-agent），并同步写入 .cursor/mcp.json 供 Cursor 读取 MCP。");
 	}
 
@@ -2738,6 +2745,27 @@ private:
 		FWorldDataMCPServer::RefreshConnectionFiles();
 		SetLastAction(LOCTEXT("RefreshedAction", "连接文件已刷新。"));
 		ShowProjectInfo();
+		return FReply::Handled();
+	}
+
+	FReply OnSetupCliClicked()
+	{
+		if (!FWorldDataMCPServer::IsRunning())
+		{
+			FWorldDataMCPServer::Start(FWorldDataMCPServer::LoadConfiguredPort());
+		}
+
+		if (!FWorldDataMCPServer::IsRunning())
+		{
+			SetLastAction(LOCTEXT("SetupCliStartFailedAction", "MCP 服务器启动失败，无法配置 CLI。"));
+			SetDetail(LOCTEXT("SetupCliFailTitle", "一键配置 CLI 失败"), FWorldDataMCPServer::GetStatusJson());
+			return FReply::Handled();
+		}
+
+		FWorldDataMCPServer::RefreshConnectionFiles();
+		SetLastAction(LOCTEXT("SetupCliDoneAction", "已写入 Claude Code、Cursor、Codex 三方 CLI 连接配置。"));
+		UEBridgeMCP::Notify(LOCTEXT("SetupCliDoneNotification", "CLI 连接配置已生成（Codex/Cursor/Claude Code）。"));
+		SetDetail(LOCTEXT("SetupCliReportTitle", "CLI 配置结果"), FWorldDataMCPServer::GetCliSetupReportJson());
 		return FReply::Handled();
 	}
 

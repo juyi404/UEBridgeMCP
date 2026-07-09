@@ -67,18 +67,27 @@ namespace UEBridgeMCP
 
 	static FString BuildClientConfigSnippet()
 	{
+		const FString Token = FWorldDataMCPServer::GetAccessToken();
 		return FString::Printf(
 			TEXT("{\n")
 			TEXT("  \"mcpServers\": {\n")
 			TEXT("    \"%s\": {\n")
 			TEXT("      \"type\": \"http\",\n")
 			TEXT("      \"url\": \"%s\",\n")
-			TEXT("      \"tool_timeout_sec\": 120\n")
+			TEXT("      \"headers\": {\n")
+			TEXT("        \"%s\": \"%s\"\n")
+			TEXT("      },\n")
+			TEXT("      \"tool_timeout_sec\": 120,\n")
+			TEXT("      \"generatedBy\": \"UEBridgeMCP\",\n")
+			TEXT("      \"projectId\": \"%s\"\n")
 			TEXT("    }\n")
 			TEXT("  }\n")
 			TEXT("}"),
 			*FWorldDataMCPServer::GetServerName(),
-			*FWorldDataMCPServer::GetMcpUrl());
+			*FWorldDataMCPServer::GetMcpUrl(),
+			*FWorldDataMCPServer::GetAccessTokenHeaderName(),
+			*Token,
+			*FWorldDataMCPServer::GetProjectId());
 	}
 
 	static FString GetSettingsFilePath()

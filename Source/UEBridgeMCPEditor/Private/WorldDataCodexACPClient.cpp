@@ -25,6 +25,129 @@ namespace
 		return !Path.IsEmpty() && (FPaths::FileExists(Path) || IFileManager::Get().FileSize(*Path) >= 0);
 	}
 
+	static FString NormalizeLaunchPath(const FString& Path)
+	{
+		FString FullPath = FPaths::ConvertRelativePathToFull(Path);
+		FPaths::CollapseRelativeDirectories(FullPath);
+		FPaths::MakePlatformFilename(FullPath);
+		return FullPath;
+	}
+
+	static FString QuoteCommandLineArg(FString Arg)
+	{
+		Arg.ReplaceInline(TEXT("\""), TEXT("\\\""));
+		return FString::Printf(TEXT("\"%s\""), *Arg);
+	}
+
+	static FString GetComSpecPath()
+	{
+#if PLATFORM_WINDOWS
+		FString CmdExe = FPlatformMisc::GetEnvironmentVariable(TEXT("COMSPEC"));
+		if (PathExists(CmdExe))
+		{
+			return NormalizeLaunchPath(CmdExe);
+		}
+
+		const FString SystemRoot = FPlatformMisc::GetEnvironmentVariable(TEXT("SystemRoot"));
+		if (!SystemRoot.IsEmpty())
+		{
+			CmdExe = FPaths::Combine(SystemRoot, TEXT("System32"), TEXT("cmd.exe"));
+			if (PathExists(CmdExe))
+			{
+				return NormalizeLaunchPath(CmdExe);
+			}
+		}
+#endif
+		return FString();
+	}
+
+	static FString GetPowerShellPath()
+	{
+#if PLATFORM_WINDOWS
+		const FString SystemRoot = FPlatformMisc::GetEnvironmentVariable(TEXT("SystemRoot"));
+		if (!SystemRoot.IsEmpty())
+		{
+			FString PowerShell = FPaths::Combine(SystemRoot, TEXT("System32"), TEXT("WindowsPowerShell"), TEXT("v1.0"), TEXT("powershell.exe"));
+			if (PathExists(PowerShell))
+			{
+				return NormalizeLaunchPath(PowerShell);
+			}
+		}
+#endif
+		return FString();
+	}
+
+	static bool BuildLaunchSpecForAdapterPath(const FString& AdapterPath, FWorldDataCodexAcpLaunchSpec& OutLaunchSpec)
+	{
+		if (!PathExists(AdapterPath))
+		{
+			return false;
+		}
+
+		const FString FullPath = NormalizeLaunchPath(AdapterPath);
+		const FString Extension = FPaths::GetExtension(FullPath).ToLower();
+		OutLaunchSpec = FWorldDataCodexAcpLaunchSpec();
+		OutLaunchSpec.DisplayPath = FullPath;
+
+#if PLATFORM_WINDOWS
+		if (Extension == TEXT("cmd") || Extension == TEXT("bat"))
+		{
+			const FString CmdExe = GetComSpecPath();
+			if (CmdExe.IsEmpty())
+			{
+				return false;
+			}
+			OutLaunchSpec.Executable = CmdExe;
+			OutLaunchSpec.Arguments = FString::Printf(TEXT("/d /s /c \"\"%s\"\""), *FullPath);
+			return true;
+		}
+
+		if (Extension == TEXT("ps1"))
+		{
+			const FString PowerShell = GetPowerShellPath();
+			if (PowerShell.IsEmpty())
+			{
+				return false;
+			}
+			OutLaunchSpec.Executable = PowerShell;
+			OutLaunchSpec.Arguments = FString::Printf(TEXT("-NoProfile -ExecutionPolicy Bypass -File %s"), *QuoteCommandLineArg(FullPath));
+			return true;
+		}
+#endif
+
+		OutLaunchSpec.Executable = FullPath;
+		OutLaunchSpec.Arguments.Empty();
+		return true;
+	}
+
+	static void AddUniquePath(TArray<FString>& Paths, const FString& Path)
+	{
+		if (Path.IsEmpty())
+		{
+			return;
+		}
+
+		const FString FullPath = NormalizeLaunchPath(Path);
+		if (!Paths.Contains(FullPath))
+		{
+			Paths.Add(FullPath);
+		}
+	}
+
+	static TArray<FString> GetAdapterCandidateNames()
+	{
+		TArray<FString> Names;
+#if PLATFORM_WINDOWS
+		Names.Add(TEXT("codex-acp.exe"));
+		Names.Add(TEXT("codex-acp.cmd"));
+		Names.Add(TEXT("codex-acp.bat"));
+		Names.Add(TEXT("codex-acp.ps1"));
+#else
+		Names.Add(TEXT("codex-acp"));
+#endif
+		return Names;
+	}
+
 	static TSharedPtr<FJsonValue> ExtractRpcId(const TSharedPtr<FJsonObject>& Message)
 	{
 		if (!Message.IsValid())
@@ -231,6 +354,7 @@ void FWorldDataCodexACPClient::Stop()
 	StdoutBuffer.Empty();
 	SessionId.Empty();
 	PendingPrompt.Empty();
+	ActiveAdapterDisplayPath.Empty();
 	InitRpcId = 0;
 	SessionRpcId = 0;
 	PromptRpcId = 0;
@@ -296,10 +420,10 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 		return true;
 	}
 
-	const FString AdapterBinary = FindAdapterBinary();
-	if (AdapterBinary.IsEmpty())
+	FWorldDataCodexAcpLaunchSpec LaunchSpec;
+	if (!FindAdapterLaunch(LaunchSpec))
 	{
-		Fail(TEXT("没有找到 codex-acp adapter。请把 codex-acp.exe 放到项目 Saved/UEBridgeMCP、项目 Binaries、插件 Binaries，或加入 PATH。"));
+		Fail(TEXT("没有找到可启动的 codex-acp adapter。请把 codex-acp.exe 放到插件 Binaries/Win64、项目 Saved/UEBridgeMCP、项目 Binaries/Win64，或把可用的 codex-acp.exe/.cmd/.ps1 加入 PATH。"));
 		return false;
 	}
 
@@ -311,7 +435,8 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 		GEngine->Exec(nullptr, TEXT("Log LogInteractiveProcess Error"));
 	}
 
-	Process = MakeShared<FInteractiveProcess>(AdapterBinary, TEXT(""), WorkingDir, true, true);
+	ActiveAdapterDisplayPath = LaunchSpec.DisplayPath;
+	Process = MakeShared<FInteractiveProcess>(LaunchSpec.Executable, LaunchSpec.Arguments, WorkingDir, true, true);
 	TWeakPtr<FWorldDataCodexACPClient> WeakSelf = AsShared();
 
 	Process->OnOutput().BindLambda([WeakSelf](const FString& Output)
@@ -336,7 +461,9 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 				Self->bCreatingSession = false;
 				Self->bPromptInFlight = false;
 				Self->PendingPermissionIds.Empty();
-				Self->Fail(FString::Printf(TEXT("codex-acp 已退出，返回码=%d，取消=%s。"), ReturnCode, bCanceled ? TEXT("true") : TEXT("false")));
+				const FString AdapterName = Self->ActiveAdapterDisplayPath.IsEmpty() ? TEXT("unknown adapter") : Self->ActiveAdapterDisplayPath;
+				Self->ActiveAdapterDisplayPath.Empty();
+				Self->Fail(FString::Printf(TEXT("codex-acp 已退出（%s），返回码=%d，取消=%s。"), *AdapterName, ReturnCode, bCanceled ? TEXT("true") : TEXT("false")));
 			}
 		});
 	});
@@ -344,11 +471,12 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 	if (!Process->Launch())
 	{
 		Process.Reset();
-		Fail(FString::Printf(TEXT("启动 codex-acp 失败：%s"), *AdapterBinary));
+		Fail(FString::Printf(TEXT("启动 codex-acp 失败：%s"), *ActiveAdapterDisplayPath));
+		ActiveAdapterDisplayPath.Empty();
 		return false;
 	}
 
-	EmitStatus(FString::Printf(TEXT("已启动 codex-acp：%s"), *AdapterBinary));
+	EmitStatus(FString::Printf(TEXT("已启动 codex-acp：%s"), *ActiveAdapterDisplayPath));
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetNumberField(TEXT("protocolVersion"), 1);
@@ -396,7 +524,12 @@ bool FWorldDataCodexACPClient::StartSessionIfReady()
 		McpServer->SetStringField(TEXT("type"), TEXT("http"));
 		McpServer->SetStringField(TEXT("name"), FWorldDataMCPServer::GetServerName());
 		McpServer->SetStringField(TEXT("url"), FWorldDataMCPServer::GetMcpUrl());
-		McpServer->SetArrayField(TEXT("headers"), TArray<TSharedPtr<FJsonValue>>());
+		TArray<TSharedPtr<FJsonValue>> Headers;
+		TSharedPtr<FJsonObject> TokenHeader = MakeShared<FJsonObject>();
+		TokenHeader->SetStringField(TEXT("name"), FWorldDataMCPServer::GetAccessTokenHeaderName());
+		TokenHeader->SetStringField(TEXT("value"), FWorldDataMCPServer::GetAccessToken());
+		Headers.Add(MakeShared<FJsonValueObject>(TokenHeader));
+		McpServer->SetArrayField(TEXT("headers"), Headers);
 		McpServers.Add(MakeShared<FJsonValueObject>(McpServer));
 	}
 	Params->SetArrayField(TEXT("mcpServers"), McpServers);
@@ -598,6 +731,21 @@ void FWorldDataCodexACPClient::ProcessLine(const FString& Line)
 	if (!FJsonSerializer::Deserialize(Reader, Message) || !Message.IsValid())
 	{
 		UE_LOG(LogWorldDataCodexACP, Warning, TEXT("ACP stdout line was not JSON: %s"), *Line);
+		FString Trimmed = Line;
+		Trimmed.TrimStartAndEndInline();
+		if (!Trimmed.IsEmpty())
+		{
+			const FString LowerLine = Trimmed.ToLower();
+			EmitText(FString::Printf(TEXT("\n\n[adapter] %s\n"), *Trimmed));
+			if (LowerLine.Contains(TEXT("authentication required")))
+			{
+				Fail(TEXT("codex-acp 返回 Authentication required。请确认 Codex/Claude adapter 已登录；若本机 Codex CLI 已登录，请优先使用插件 Binaries/Win64 或项目 Saved/UEBridgeMCP 中的 codex-acp.exe，避免 PATH 上的失效 npm shim。"));
+			}
+			else if (LowerLine.Contains(TEXT("cannot find module")) || LowerLine.Contains(TEXT("module_not_found")))
+			{
+				Fail(TEXT("codex-acp 启动后找不到 Node 模块。PATH 上的 codex-acp npm shim 可能已经失效，请改用插件自带 codex-acp.exe，或重新安装可用的 codex-acp。"));
+			}
+		}
 		return;
 	}
 
@@ -856,41 +1004,55 @@ void FWorldDataCodexACPClient::HandleSessionUpdate(const FString& AcpSessionId, 
 	}
 }
 
-FString FWorldDataCodexACPClient::FindAdapterBinary() const
+bool FWorldDataCodexACPClient::FindAdapterLaunch(FWorldDataCodexAcpLaunchSpec& OutLaunchSpec) const
 {
 	const FString EnvPath = FPlatformMisc::GetEnvironmentVariable(TEXT("CODEX_ACP_EXECUTABLE"));
-	if (PathExists(EnvPath))
+	if (BuildLaunchSpecForAdapterPath(EnvPath, OutLaunchSpec))
 	{
-		return EnvPath;
+		return true;
+	}
+	if (!EnvPath.IsEmpty() && BuildLaunchSpecForAdapterPath(ResolveOnPath(EnvPath), OutLaunchSpec))
+	{
+		return true;
 	}
 
-#if PLATFORM_WINDOWS
-	const FString ExeName = TEXT("codex-acp.exe");
-#else
-	const FString ExeName = TEXT("codex-acp");
-#endif
-
+	const TArray<FString> CandidateNames = GetAdapterCandidateNames();
 	TArray<FString> SearchDirs;
-	SearchDirs.Add(FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries")));
-	SearchDirs.Add(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP")));
 	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UEBridgeMCP")))
 	{
-		SearchDirs.Add(FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries")));
-		SearchDirs.Add(FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries"), TEXT("Win64")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries"), TEXT("Win64")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdParty"), TEXT("codex-acp"), TEXT("Win64")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdParty"), TEXT("codex-acp")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("Win64")));
+		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources")));
 	}
+	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP")));
+	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries"), TEXT("Win64")));
+	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries")));
 
 	for (const FString& Dir : SearchDirs)
 	{
-		FString FullPath = FPaths::Combine(Dir, ExeName);
-		FullPath = FPaths::ConvertRelativePathToFull(FullPath);
-		FPaths::CollapseRelativeDirectories(FullPath);
-		if (PathExists(FullPath))
+		for (const FString& Name : CandidateNames)
 		{
-			return FullPath;
+			const FString FullPath = FPaths::Combine(Dir, Name);
+			if (BuildLaunchSpecForAdapterPath(FullPath, OutLaunchSpec))
+			{
+				return true;
+			}
 		}
 	}
 
-	return ResolveOnPath(ExeName);
+	for (const FString& Name : CandidateNames)
+	{
+		const FString PathOnPath = ResolveOnPath(Name);
+		if (BuildLaunchSpecForAdapterPath(PathOnPath, OutLaunchSpec))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 FString FWorldDataCodexACPClient::ResolveOnPath(const FString& Command) const
