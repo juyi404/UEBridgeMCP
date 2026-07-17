@@ -7,6 +7,33 @@
 class FJsonObject;
 class FJsonValue;
 
+struct FWorldDataMCPSessionState
+{
+	FString ProtocolVersion;
+	FString ClientLabel;
+	FString ClientVersion;
+	FString Principal;
+	FString Scope;
+	FString TaskId;
+	FString ThreadId;
+	FDateTime CreatedAtUtc;
+	FDateTime LastActivityAtUtc;
+};
+
+struct FWorldDataMCPApprovalSummary
+{
+	FString ApprovalId;
+	FString ToolName;
+	FString Risk;
+	FString TargetSummary;
+	FString ChangeSummaryHash;
+	FString TargetRevision;
+	FString OwnerSessionId;
+	FDateTime CreatedAtUtc;
+	FDateTime ExpiresAtUtc;
+	bool bReadyForDecision = false;
+};
+
 class FWorldDataMCPServer
 {
 public:
@@ -21,6 +48,12 @@ public:
 	static FString GetMcpUrl();
 	static FString GetAccessTokenHeaderName();
 	static FString GetAccessToken();
+	// Revokes current MCP sessions and persists a new access token. Client
+	// configuration remains an explicit, separate user action.
+	static bool RotateAccessToken(FString& OutError);
+	static bool IsUnsafePythonEnabled();
+	static FString GetUnsafePythonCapabilityToken();
+	static bool ValidateUnsafePythonCapability(const FString& Candidate);
 	static FString GetProjectInfoJson();
 	static FString GetStatusJson();
 	static FString GetLastError();
@@ -32,10 +65,17 @@ public:
 	static FString GetCliSetupReportJson();
 	static FString GetSavedConfigFilePath();
 	static FString GetConnectionFilePath();
+	// These are editor-panel-only APIs. MCP clients cannot approve their own
+	// mutations; they can only observe the returned approval/job state.
+	static TArray<FWorldDataMCPApprovalSummary> GetPendingApprovals();
+	static bool ResolvePendingApproval(const FString& ApprovalId, bool bApprove, FString& OutError);
 	static FString GetToolDefinitionsJson();
 	static FString GetResourceListJson();
 	static FString ReadResource(const FString& Uri);
+	// Updates only Saved/UEBridgeMCP state. It never writes client configuration.
 	static void RefreshConnectionFiles();
+	// Explicit opt-in action for generating local project/client configuration files.
+	static void ProvisionClientConfigurations();
 	static TSharedPtr<FJsonObject> ProcessJsonRpc(const TSharedPtr<FJsonObject>& Request);
 
 private:
@@ -61,17 +101,18 @@ private:
 	static void SaveConfiguredPort(int32 Port);
 	static void WriteClientConfig();
 	static void WriteCodexClientConfig();
-	static void WriteClaudeProjectSettings();
 	static void WriteProjectConnectionFile();
-	static FString RegisterSession();
+	static FString RegisterSession(const FString& ProtocolVersion, const FString& ClientLabel, const FString& ClientVersion, const FString& RequestedTaskId, const FString& RequestedThreadId);
+	static bool IsSessionActiveForApproval(const FString& SessionId);
 
 	static TSharedPtr<IHttpRouter> HttpRouter;
 	static TArray<FHttpRouteHandle> RouteHandles;
 	static int32 BoundPort;
 	static bool bRunning;
-	static TArray<FString> SessionIds;
-	static FString NegotiatedProtocolVersion;
+	static TMap<FString, FWorldDataMCPSessionState> SessionProtocolVersions;
 	static FString AccessToken;
+	static FString UnsafePythonCapabilityToken;
+	static FDateTime UnsafePythonCapabilityExpiresAtUtc;
 	static FString LastError;
 	static FDateTime StartedAtUtc;
 	static FDateTime LastRefreshAtUtc;

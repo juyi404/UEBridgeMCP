@@ -6,20 +6,170 @@
 #include "Engine/Engine.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFileManager.h"
-#include "HAL/PlatformMisc.h"
-#include "Interfaces/IPluginManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/Paths.h"
+#include "Misc/SecureHash.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "WorldDataMCPServer.h"
+#include "WorldDataAgentLogRedaction.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <bcrypt.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogWorldDataCodexACP, Log, All);
 
 namespace
 {
+	static constexpr int64 GMaxAcpProjectFileReadBytes = 1024 * 1024;
+	// The adapter is a native child process with access to the user's editor
+	// session. Treat its stdout as untrusted input and never let a bad adapter
+	// grow the editor's game-thread queue or transcript without a bound.
+	static constexpr int32 GMaxAcpStdoutBufferCharacters = 512 * 1024;
+	static constexpr int32 GMaxAcpFrameCharacters = 256 * 1024;
+	static constexpr int32 GMaxDisplayedAdapterTextCharacters = 8 * 1024;
+
+	struct FWorldDataTrustedAdapterSettings
+	{
+		FString ExecutablePath;
+		FString ExpectedSha256;
+	};
+
+	static bool IsHexSha256(const FString& Value)
+	{
+		if (Value.Len() != 64)
+		{
+			return false;
+		}
+		for (const TCHAR Character : Value)
+		{
+			if (!FChar::IsHexDigit(Character))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static FWorldDataTrustedAdapterSettings GetTrustedAdapterSettings()
+	{
+		FWorldDataTrustedAdapterSettings Settings;
+		if (GConfig)
+		{
+			GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterExecutable"), Settings.ExecutablePath, GGameIni);
+			GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterSha256"), Settings.ExpectedSha256, GGameIni);
+		}
+		Settings.ExecutablePath.TrimStartAndEndInline();
+		Settings.ExpectedSha256.TrimStartAndEndInline();
+		Settings.ExpectedSha256.ToLowerInline();
+		return Settings;
+	}
+
+	static bool TryGetFileSha256(const FString& Path, FString& OutSha256)
+	{
+		OutSha256.Empty();
+#if PLATFORM_WINDOWS
+		TArray<uint8> Bytes;
+		if (!FFileHelper::LoadFileToArray(Bytes, *Path) || Bytes.Num() == 0)
+		{
+			return false;
+		}
+		BCRYPT_ALG_HANDLE Algorithm = nullptr;
+		BCRYPT_HASH_HANDLE Hash = nullptr;
+		DWORD ObjectLength = 0;
+		DWORD ResultLength = 0;
+		DWORD HashLength = 0;
+		if (BCryptOpenAlgorithmProvider(&Algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0
+			|| BCryptGetProperty(Algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&ObjectLength), sizeof(ObjectLength), &ResultLength, 0) < 0
+			|| BCryptGetProperty(Algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&HashLength), sizeof(HashLength), &ResultLength, 0) < 0)
+		{
+			if (Algorithm) BCryptCloseAlgorithmProvider(Algorithm, 0);
+			return false;
+		}
+		TArray<uint8> HashObject;
+		TArray<uint8> Digest;
+		HashObject.SetNumUninitialized(ObjectLength);
+		Digest.SetNumUninitialized(HashLength);
+		const bool bHashed = BCryptCreateHash(Algorithm, &Hash, HashObject.GetData(), HashObject.Num(), nullptr, 0, 0) >= 0
+			&& BCryptHashData(Hash, Bytes.GetData(), Bytes.Num(), 0) >= 0
+			&& BCryptFinishHash(Hash, Digest.GetData(), Digest.Num(), 0) >= 0;
+		if (Hash) BCryptDestroyHash(Hash);
+		BCryptCloseAlgorithmProvider(Algorithm, 0);
+		if (!bHashed) return false;
+		OutSha256 = BytesToHex(Digest.GetData(), Digest.Num()).ToLower();
+		return true;
+#else
+		return false;
+#endif
+	}
+
+	static FString RedactKnownSecrets(FString Text)
+	{
+		return WorldDataAgentLogRedaction::Redact(MoveTemp(Text));
+	}
+
+	static bool IsAcpProjectFileReadEnabled()
+	{
+		bool bEnabled = false;
+		if (GConfig)
+		{
+			GConfig->GetBool(TEXT("UEBridgeMCP.Security"), TEXT("bEnableAcpProjectFileRead"), bEnabled, GGameIni);
+		}
+		return bEnabled;
+	}
+
+	static bool ResolveAcpProjectFilePath(const FString& InputPath, FString& OutPath, FString& OutError)
+	{
+		if (InputPath.TrimStartAndEnd().IsEmpty())
+		{
+			OutError = TEXT("A project-relative file path is required.");
+			return false;
+		}
+
+		FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		FPaths::NormalizeDirectoryName(ProjectDir);
+
+		FString RequestedPath = InputPath;
+		RequestedPath.TrimStartAndEndInline();
+		if (!FPaths::IsRelative(RequestedPath))
+		{
+			OutError = TEXT("ACP file reads require a project-relative path.");
+			return false;
+		}
+
+		FString Candidate = FPaths::Combine(ProjectDir, RequestedPath);
+		Candidate = FPaths::ConvertRelativePathToFull(Candidate);
+		FPaths::CollapseRelativeDirectories(Candidate);
+		FPaths::NormalizeFilename(Candidate);
+
+		if (!Candidate.StartsWith(ProjectDir + TEXT("/"), ESearchCase::IgnoreCase))
+		{
+			OutError = TEXT("ACP file reads are limited to files inside the project directory.");
+			return false;
+		}
+
+		const int64 FileSize = IFileManager::Get().FileSize(*Candidate);
+		if (FileSize < 0)
+		{
+			OutError = TEXT("The requested project file does not exist.");
+			return false;
+		}
+		if (FileSize > GMaxAcpProjectFileReadBytes)
+		{
+			OutError = FString::Printf(TEXT("ACP file reads are limited to %lld bytes."), GMaxAcpProjectFileReadBytes);
+			return false;
+		}
+
+		OutPath = Candidate;
+		return true;
+	}
+
 	static bool PathExists(const FString& Path)
 	{
 		return !Path.IsEmpty() && (FPaths::FileExists(Path) || IFileManager::Get().FileSize(*Path) >= 0);
@@ -31,50 +181,6 @@ namespace
 		FPaths::CollapseRelativeDirectories(FullPath);
 		FPaths::MakePlatformFilename(FullPath);
 		return FullPath;
-	}
-
-	static FString QuoteCommandLineArg(FString Arg)
-	{
-		Arg.ReplaceInline(TEXT("\""), TEXT("\\\""));
-		return FString::Printf(TEXT("\"%s\""), *Arg);
-	}
-
-	static FString GetComSpecPath()
-	{
-#if PLATFORM_WINDOWS
-		FString CmdExe = FPlatformMisc::GetEnvironmentVariable(TEXT("COMSPEC"));
-		if (PathExists(CmdExe))
-		{
-			return NormalizeLaunchPath(CmdExe);
-		}
-
-		const FString SystemRoot = FPlatformMisc::GetEnvironmentVariable(TEXT("SystemRoot"));
-		if (!SystemRoot.IsEmpty())
-		{
-			CmdExe = FPaths::Combine(SystemRoot, TEXT("System32"), TEXT("cmd.exe"));
-			if (PathExists(CmdExe))
-			{
-				return NormalizeLaunchPath(CmdExe);
-			}
-		}
-#endif
-		return FString();
-	}
-
-	static FString GetPowerShellPath()
-	{
-#if PLATFORM_WINDOWS
-		const FString SystemRoot = FPlatformMisc::GetEnvironmentVariable(TEXT("SystemRoot"));
-		if (!SystemRoot.IsEmpty())
-		{
-			FString PowerShell = FPaths::Combine(SystemRoot, TEXT("System32"), TEXT("WindowsPowerShell"), TEXT("v1.0"), TEXT("powershell.exe"));
-			if (PathExists(PowerShell))
-			{
-				return NormalizeLaunchPath(PowerShell);
-			}
-		}
-#endif
-		return FString();
 	}
 
 	static bool BuildLaunchSpecForAdapterPath(const FString& AdapterPath, FWorldDataCodexAcpLaunchSpec& OutLaunchSpec)
@@ -90,28 +196,11 @@ namespace
 		OutLaunchSpec.DisplayPath = FullPath;
 
 #if PLATFORM_WINDOWS
-		if (Extension == TEXT("cmd") || Extension == TEXT("bat"))
+		// Do not invoke command/batch/PowerShell shims. A PATH or script shim is
+		// not an integrity boundary and would run with the editor user's rights.
+		if (Extension != TEXT("exe"))
 		{
-			const FString CmdExe = GetComSpecPath();
-			if (CmdExe.IsEmpty())
-			{
-				return false;
-			}
-			OutLaunchSpec.Executable = CmdExe;
-			OutLaunchSpec.Arguments = FString::Printf(TEXT("/d /s /c \"\"%s\"\""), *FullPath);
-			return true;
-		}
-
-		if (Extension == TEXT("ps1"))
-		{
-			const FString PowerShell = GetPowerShellPath();
-			if (PowerShell.IsEmpty())
-			{
-				return false;
-			}
-			OutLaunchSpec.Executable = PowerShell;
-			OutLaunchSpec.Arguments = FString::Printf(TEXT("-NoProfile -ExecutionPolicy Bypass -File %s"), *QuoteCommandLineArg(FullPath));
-			return true;
+			return false;
 		}
 #endif
 
@@ -120,33 +209,6 @@ namespace
 		return true;
 	}
 
-	static void AddUniquePath(TArray<FString>& Paths, const FString& Path)
-	{
-		if (Path.IsEmpty())
-		{
-			return;
-		}
-
-		const FString FullPath = NormalizeLaunchPath(Path);
-		if (!Paths.Contains(FullPath))
-		{
-			Paths.Add(FullPath);
-		}
-	}
-
-	static TArray<FString> GetAdapterCandidateNames()
-	{
-		TArray<FString> Names;
-#if PLATFORM_WINDOWS
-		Names.Add(TEXT("codex-acp.exe"));
-		Names.Add(TEXT("codex-acp.cmd"));
-		Names.Add(TEXT("codex-acp.bat"));
-		Names.Add(TEXT("codex-acp.ps1"));
-#else
-		Names.Add(TEXT("codex-acp"));
-#endif
-		return Names;
-	}
 
 	static TSharedPtr<FJsonValue> ExtractRpcId(const TSharedPtr<FJsonObject>& Message)
 	{
@@ -345,6 +407,9 @@ void FWorldDataCodexACPClient::SendPrompt(const FString& Prompt)
 
 void FWorldDataCodexACPClient::Stop()
 {
+	// Invalidate queued callbacks before cancelling the process. A completed
+	// callback from an old process must never clear a newer process/session.
+	++ProcessGeneration;
 	if (Process.IsValid())
 	{
 		Process->Cancel(true);
@@ -367,6 +432,12 @@ void FWorldDataCodexACPClient::Stop()
 void FWorldDataCodexACPClient::SetPermissionMode(EWorldDataCodexPermissionMode InMode)
 {
 	PermissionMode = InMode;
+}
+
+void FWorldDataCodexACPClient::SetContextIdentity(const FString& InTaskId, const FString& InThreadId)
+{
+	ContextTaskId = InTaskId.Left(128);
+	ContextThreadId = InThreadId.Left(128);
 }
 
 EWorldDataCodexPermissionMode FWorldDataCodexACPClient::GetPermissionMode() const
@@ -423,7 +494,7 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 	FWorldDataCodexAcpLaunchSpec LaunchSpec;
 	if (!FindAdapterLaunch(LaunchSpec))
 	{
-		Fail(TEXT("没有找到可启动的 codex-acp adapter。请把 codex-acp.exe 放到插件 Binaries/Win64、项目 Saved/UEBridgeMCP、项目 Binaries/Win64，或把可用的 codex-acp.exe/.cmd/.ps1 加入 PATH。"));
+		Fail(TEXT("没有找到受信任的 ACP adapter。请在 [UEBridgeMCP.Security] 中同时配置绝对路径 AcpAdapterExecutable 和该文件的 AcpAdapterSha256。PATH、.cmd/.bat/.ps1 和自动目录扫描已出于安全原因禁用。"));
 		return false;
 	}
 
@@ -438,24 +509,32 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 	ActiveAdapterDisplayPath = LaunchSpec.DisplayPath;
 	Process = MakeShared<FInteractiveProcess>(LaunchSpec.Executable, LaunchSpec.Arguments, WorkingDir, true, true);
 	TWeakPtr<FWorldDataCodexACPClient> WeakSelf = AsShared();
+	const uint64 LaunchGeneration = ++ProcessGeneration;
 
-	Process->OnOutput().BindLambda([WeakSelf](const FString& Output)
+	Process->OnOutput().BindLambda([WeakSelf, LaunchGeneration](const FString& Output)
 	{
-		AsyncTask(ENamedThreads::GameThread, [WeakSelf, Output]()
+		AsyncTask(ENamedThreads::GameThread, [WeakSelf, Output, LaunchGeneration]()
 		{
 			if (TSharedPtr<FWorldDataCodexACPClient> Self = WeakSelf.Pin())
 			{
-				Self->ConsumeOutput(Output);
+				if (Self->ProcessGeneration == LaunchGeneration)
+				{
+					Self->ConsumeOutput(Output);
+				}
 			}
 		});
 	});
 
-	Process->OnCompleted().BindLambda([WeakSelf](int32 ReturnCode, bool bCanceled)
+	Process->OnCompleted().BindLambda([WeakSelf, LaunchGeneration](int32 ReturnCode, bool bCanceled)
 	{
-		AsyncTask(ENamedThreads::GameThread, [WeakSelf, ReturnCode, bCanceled]()
+		AsyncTask(ENamedThreads::GameThread, [WeakSelf, ReturnCode, bCanceled, LaunchGeneration]()
 		{
 			if (TSharedPtr<FWorldDataCodexACPClient> Self = WeakSelf.Pin())
 			{
+				if (Self->ProcessGeneration != LaunchGeneration)
+				{
+					return;
+				}
 				Self->Process.Reset();
 				Self->bInitialized = false;
 				Self->bCreatingSession = false;
@@ -483,7 +562,7 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 
 	TSharedPtr<FJsonObject> Caps = MakeShared<FJsonObject>();
 	TSharedPtr<FJsonObject> FsCaps = MakeShared<FJsonObject>();
-	FsCaps->SetBoolField(TEXT("readTextFile"), true);
+	FsCaps->SetBoolField(TEXT("readTextFile"), IsAcpProjectFileReadEnabled());
 	FsCaps->SetBoolField(TEXT("writeTextFile"), false);
 	Caps->SetObjectField(TEXT("fs"), FsCaps);
 	Caps->SetBoolField(TEXT("terminal"), false);
@@ -506,11 +585,6 @@ bool FWorldDataCodexACPClient::StartSessionIfReady()
 		return !SessionId.IsEmpty();
 	}
 
-	if (!FWorldDataMCPServer::IsRunning())
-	{
-		FWorldDataMCPServer::Start(FWorldDataMCPServer::LoadConfiguredPort());
-	}
-
 	FString WorkingDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	FPaths::MakePlatformFilename(WorkingDir);
 
@@ -518,21 +592,25 @@ bool FWorldDataCodexACPClient::StartSessionIfReady()
 	Params->SetStringField(TEXT("cwd"), WorkingDir);
 
 	TArray<TSharedPtr<FJsonValue>> McpServers;
-	if (FWorldDataMCPServer::IsRunning())
+	if (McpConnection.bAvailable)
 	{
 		TSharedPtr<FJsonObject> McpServer = MakeShared<FJsonObject>();
 		McpServer->SetStringField(TEXT("type"), TEXT("http"));
-		McpServer->SetStringField(TEXT("name"), FWorldDataMCPServer::GetServerName());
-		McpServer->SetStringField(TEXT("url"), FWorldDataMCPServer::GetMcpUrl());
+		McpServer->SetStringField(TEXT("name"), McpConnection.ServerName);
+		McpServer->SetStringField(TEXT("url"), McpConnection.Url);
 		TArray<TSharedPtr<FJsonValue>> Headers;
 		TSharedPtr<FJsonObject> TokenHeader = MakeShared<FJsonObject>();
-		TokenHeader->SetStringField(TEXT("name"), FWorldDataMCPServer::GetAccessTokenHeaderName());
-		TokenHeader->SetStringField(TEXT("value"), FWorldDataMCPServer::GetAccessToken());
+		TokenHeader->SetStringField(TEXT("name"), McpConnection.AccessTokenHeader);
+		TokenHeader->SetStringField(TEXT("value"), McpConnection.AccessToken);
 		Headers.Add(MakeShared<FJsonValueObject>(TokenHeader));
 		McpServer->SetArrayField(TEXT("headers"), Headers);
 		McpServers.Add(MakeShared<FJsonValueObject>(McpServer));
 	}
 	Params->SetArrayField(TEXT("mcpServers"), McpServers);
+	TSharedRef<FJsonObject> Context = MakeShared<FJsonObject>();
+	Context->SetStringField(TEXT("taskId"), ContextTaskId);
+	Context->SetStringField(TEXT("threadId"), ContextThreadId);
+	Params->SetObjectField(TEXT("worlddataContext"), Context);
 
 	bCreatingSession = true;
 	SessionRpcId = SendRpc(TEXT("session/new"), Params);
@@ -555,6 +633,10 @@ void FWorldDataCodexACPClient::SendPendingPromptIfReady()
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetStringField(TEXT("sessionId"), SessionId);
+	PromptText += FString::Printf(
+		TEXT("\n\nWorldData context contract: taskId=%s, threadId=%s. Treat every MCP tool ContextEnvelope as authoritative. Before a mutation, send its taskId, threadId, worldRevision, and objectRevision in arguments.worlddataContext."),
+		*ContextTaskId,
+		*ContextThreadId);
 
 	TArray<TSharedPtr<FJsonValue>> Prompt;
 	TSharedPtr<FJsonObject> TextBlock = MakeShared<FJsonObject>();
@@ -625,12 +707,21 @@ void FWorldDataCodexACPClient::SendRaw(const FString& Json)
 		return;
 	}
 
-	UE_LOG(LogWorldDataCodexACP, Verbose, TEXT("ACP send: %s"), *Json);
+	// Requests can contain the local MCP access token. Log only shape metadata,
+	// never the raw JSON-RPC body or any secret-bearing header values.
+	UE_LOG(LogWorldDataCodexACP, Verbose, TEXT("ACP send: %d UTF-16 characters"), Json.Len());
 	Process->SendWhenReady(Json + TEXT("\n"));
 }
 
 void FWorldDataCodexACPClient::ConsumeOutput(const FString& Output)
 {
+	if (Output.Len() > GMaxAcpFrameCharacters || StdoutBuffer.Len() + Output.Len() > GMaxAcpStdoutBufferCharacters)
+	{
+		Fail(TEXT("codex-acp 输出超过安全缓冲区限制，已停止该 adapter。"));
+		Stop();
+		return;
+	}
+
 	StdoutBuffer += Output;
 
 	// Newline-delimited JSON-RPC frames (the common case). Scan the buffer once and
@@ -724,18 +815,30 @@ void FWorldDataCodexACPClient::ConsumeOutput(const FString& Output)
 
 void FWorldDataCodexACPClient::ProcessLine(const FString& Line)
 {
-	UE_LOG(LogWorldDataCodexACP, Verbose, TEXT("ACP recv: %s"), *Line);
+	if (Line.Len() > GMaxAcpFrameCharacters)
+	{
+		Fail(TEXT("codex-acp 返回的单个 JSON-RPC 帧过大，已拒绝处理。"));
+		Stop();
+		return;
+	}
+
+	UE_LOG(LogWorldDataCodexACP, Verbose, TEXT("ACP recv: %d UTF-16 characters"), Line.Len());
 
 	TSharedPtr<FJsonObject> Message;
 	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Line);
 	if (!FJsonSerializer::Deserialize(Reader, Message) || !Message.IsValid())
 	{
-		UE_LOG(LogWorldDataCodexACP, Warning, TEXT("ACP stdout line was not JSON: %s"), *Line);
+		UE_LOG(LogWorldDataCodexACP, Warning, TEXT("ACP stdout line was not JSON (%d UTF-16 characters)."), Line.Len());
 		FString Trimmed = Line;
 		Trimmed.TrimStartAndEndInline();
 		if (!Trimmed.IsEmpty())
 		{
 			const FString LowerLine = Trimmed.ToLower();
+			Trimmed = RedactKnownSecrets(Trimmed);
+			if (Trimmed.Len() > GMaxDisplayedAdapterTextCharacters)
+			{
+				Trimmed = Trimmed.Left(GMaxDisplayedAdapterTextCharacters) + TEXT("\n[adapter output truncated]");
+			}
 			EmitText(FString::Printf(TEXT("\n\n[adapter] %s\n"), *Trimmed));
 			if (LowerLine.Contains(TEXT("authentication required")))
 			{
@@ -772,14 +875,6 @@ void FWorldDataCodexACPClient::HandleRpcResponse(int32 Id, const TSharedPtr<FJso
 	if (Error.IsValid())
 	{
 		Fail(GetOptionalString(Error, TEXT("message")).IsEmpty() ? TEXT("ACP 返回未知错误。") : GetOptionalString(Error, TEXT("message")));
-		if (Id == PromptRpcId)
-		{
-			bPromptInFlight = false;
-		}
-		if (Id == SessionRpcId)
-		{
-			bCreatingSession = false;
-		}
 		return;
 	}
 
@@ -831,38 +926,32 @@ void FWorldDataCodexACPClient::HandleMethod(const FString& Method, const TShared
 		return;
 	}
 
-	if (Method == TEXT("mcp/connect") && bHasId)
+	if ((Method == TEXT("mcp/connect") || Method == TEXT("mcp/message")) && bHasId)
 	{
-		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetStringField(TEXT("connectionId"), FWorldDataMCPServer::GetServerName() + TEXT("-conn"));
-		SendRpcResult(Id, Result);
-		return;
-	}
-
-	if (Method == TEXT("mcp/message") && bHasId && Params.IsValid())
-	{
-		TSharedPtr<FJsonObject> McpMessage = Params->HasField(TEXT("message")) ? Params->GetObjectField(TEXT("message")) : nullptr;
-		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-		if (McpMessage.IsValid())
-		{
-			const FString McpMethod = GetOptionalString(McpMessage, TEXT("method"));
-			if (PermissionMode == EWorldDataCodexPermissionMode::Plan && McpMethod == TEXT("tools/call"))
-			{
-				Result->SetObjectField(TEXT("message"), BuildJsonRpcErrorResponse(McpMessage, -32002, TEXT("计划模式已启用：工具调用被阻止。请只输出计划。")));
-				EmitText(TEXT("\n\n[系统] 计划模式已阻止一次 MCP 工具调用。\n"));
-			}
-			else
-			{
-				Result->SetObjectField(TEXT("message"), FWorldDataMCPServer::ProcessJsonRpc(McpMessage));
-			}
-		}
-		SendRpcResult(Id, Result);
+		// Never turn an arbitrary adapter process into an in-process MCP caller.
+		// The session/new payload already exposes the authenticated loopback HTTP
+		// endpoint; using it keeps ACP calls subject to the same token, MCP session,
+		// Origin/Host checks, rate controls, and audit identity as every other client.
+		SendRpcError(Id, -32002, TEXT("The in-process ACP MCP bridge is disabled. Use the HTTP MCP server supplied in session/new and complete its initialize/session handshake."));
 		return;
 	}
 
 	if (Method == TEXT("fs/read_text_file") && bHasId && Params.IsValid())
 	{
-		FString Path = GetOptionalString(Params, TEXT("path"));
+		if (!IsAcpProjectFileReadEnabled())
+		{
+			SendRpcError(Id, -32002, TEXT("ACP project file access is disabled. Set [UEBridgeMCP.Security] bEnableAcpProjectFileRead=true in the project configuration and restart the editor to opt in."));
+			return;
+		}
+
+		FString Path;
+		FString PathError;
+		if (!ResolveAcpProjectFilePath(GetOptionalString(Params, TEXT("path")), Path, PathError))
+		{
+			SendRpcError(Id, -32002, PathError);
+			return;
+		}
+
 		FString Content;
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		if (FFileHelper::LoadFileToString(Content, *Path))
@@ -965,7 +1054,7 @@ void FWorldDataCodexACPClient::HandleMethod(const FString& Method, const TShared
 
 	if (bHasId)
 	{
-		SendRpcResult(Id, MakeShared<FJsonObject>());
+		SendRpcError(Id, -32601, FString::Printf(TEXT("Unsupported ACP server request: %s"), *Method));
 	}
 }
 
@@ -1006,77 +1095,34 @@ void FWorldDataCodexACPClient::HandleSessionUpdate(const FString& AcpSessionId, 
 
 bool FWorldDataCodexACPClient::FindAdapterLaunch(FWorldDataCodexAcpLaunchSpec& OutLaunchSpec) const
 {
-	const FString EnvPath = FPlatformMisc::GetEnvironmentVariable(TEXT("CODEX_ACP_EXECUTABLE"));
-	if (BuildLaunchSpecForAdapterPath(EnvPath, OutLaunchSpec))
+	const FWorldDataTrustedAdapterSettings Settings = GetTrustedAdapterSettings();
+	if (Settings.ExecutablePath.IsEmpty() || Settings.ExpectedSha256.IsEmpty() || !IsHexSha256(Settings.ExpectedSha256))
 	{
-		return true;
-	}
-	if (!EnvPath.IsEmpty() && BuildLaunchSpecForAdapterPath(ResolveOnPath(EnvPath), OutLaunchSpec))
-	{
-		return true;
+		return false;
 	}
 
-	const TArray<FString> CandidateNames = GetAdapterCandidateNames();
-	TArray<FString> SearchDirs;
-	if (TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UEBridgeMCP")))
+	// A trusted adapter is intentionally an explicit absolute path. Relative
+	// paths, PATH lookup, and plugin/project directory discovery are all mutable
+	// search surfaces and therefore unsuitable for a process with editor access.
+	if (FPaths::IsRelative(Settings.ExecutablePath) || !BuildLaunchSpecForAdapterPath(Settings.ExecutablePath, OutLaunchSpec))
 	{
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries"), TEXT("Win64")));
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Binaries")));
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdParty"), TEXT("codex-acp"), TEXT("Win64")));
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("ThirdParty"), TEXT("codex-acp")));
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("Win64")));
-		AddUniquePath(SearchDirs, FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources")));
-	}
-	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP")));
-	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries"), TEXT("Win64")));
-	AddUniquePath(SearchDirs, FPaths::Combine(FPaths::ProjectDir(), TEXT("Binaries")));
-
-	for (const FString& Dir : SearchDirs)
-	{
-		for (const FString& Name : CandidateNames)
-		{
-			const FString FullPath = FPaths::Combine(Dir, Name);
-			if (BuildLaunchSpecForAdapterPath(FullPath, OutLaunchSpec))
-			{
-				return true;
-			}
-		}
+		return false;
 	}
 
-	for (const FString& Name : CandidateNames)
+	FString ActualSha256;
+	if (!TryGetFileSha256(OutLaunchSpec.Executable, ActualSha256))
 	{
-		const FString PathOnPath = ResolveOnPath(Name);
-		if (BuildLaunchSpecForAdapterPath(PathOnPath, OutLaunchSpec))
-		{
-			return true;
-		}
+		return false;
 	}
 
-	return false;
-}
-
-FString FWorldDataCodexACPClient::ResolveOnPath(const FString& Command) const
-{
-#if PLATFORM_WINDOWS
-	int32 ReturnCode = -1;
-	FString StdOut;
-	FString StdErr;
-	FPlatformProcess::ExecProcess(TEXT("where.exe"), *Command, &ReturnCode, &StdOut, &StdErr);
-	if (ReturnCode == 0)
+	if (!ActualSha256.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase))
 	{
-		TArray<FString> Lines;
-		StdOut.ParseIntoArrayLines(Lines, true);
-		for (FString Line : Lines)
-		{
-			Line.TrimStartAndEndInline();
-			if (PathExists(Line))
-			{
-				return Line;
-			}
-		}
+		UE_LOG(LogWorldDataCodexACP, Error, TEXT("Rejected ACP adapter because its configured SHA-256 did not match: %s"), *OutLaunchSpec.DisplayPath);
+		OutLaunchSpec = FWorldDataCodexAcpLaunchSpec();
+		return false;
 	}
-#endif
-	return FString();
+
+	return true;
 }
 
 FString FWorldDataCodexACPClient::JsonToString(const TSharedPtr<FJsonObject>& Object) const
@@ -1095,11 +1141,18 @@ FString FWorldDataCodexACPClient::JsonToString(const TSharedPtr<FJsonObject>& Ob
 
 void FWorldDataCodexACPClient::Fail(const FString& Message)
 {
-	LastError = Message;
-	UE_LOG(LogWorldDataCodexACP, Warning, TEXT("%s"), *Message);
+	LastError = RedactKnownSecrets(Message);
+	// Any adapter failure is terminal for the request that was in flight. Leaving
+	// these flags set makes the UI reject conversation changes as if Codex were
+	// still working, even after it has reported an error.
+	PendingPrompt.Empty();
+	bCreatingSession = false;
+	bPromptInFlight = false;
+	PendingPermissionIds.Empty();
+	UE_LOG(LogWorldDataCodexACP, Warning, TEXT("%s"), *LastError);
 	if (OnError.IsBound())
 	{
-		OnError.Execute(Message);
+		OnError.Execute(LastError);
 	}
 }
 
@@ -1107,7 +1160,7 @@ void FWorldDataCodexACPClient::EmitStatus(const FString& Message)
 {
 	if (OnStatus.IsBound())
 	{
-		OnStatus.Execute(Message);
+		OnStatus.Execute(RedactKnownSecrets(Message));
 	}
 }
 
@@ -1115,6 +1168,6 @@ void FWorldDataCodexACPClient::EmitText(const FString& Text)
 {
 	if (OnText.IsBound())
 	{
-		OnText.Execute(Text);
+		OnText.Execute(RedactKnownSecrets(Text));
 	}
 }

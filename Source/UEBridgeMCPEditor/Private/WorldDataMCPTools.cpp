@@ -309,6 +309,19 @@ namespace
 			return nullptr;
 		}
 
+		// Object paths are the preferred mutation target. They are unique within
+		// the loaded world, unlike editor labels, and are returned as actorPath by
+		// every actor-reading tool.
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (IsValid(Actor) && Actor->GetPathName().Equals(NameOrLabel, ESearchCase::CaseSensitive))
+			{
+				return Actor;
+			}
+		}
+
+		AActor* Candidate = nullptr;
 		for (TActorIterator<AActor> It(World); It; ++It)
 		{
 			AActor* Actor = *It;
@@ -320,11 +333,17 @@ namespace
 			if (Actor->GetName().Equals(NameOrLabel, ESearchCase::IgnoreCase)
 				|| Actor->GetActorLabel().Equals(NameOrLabel, ESearchCase::IgnoreCase))
 			{
-				return Actor;
+				// Never let a mutating request silently pick the first duplicate label.
+				// Callers can retry with the actorPath emitted by list/details tools.
+				if (Candidate && Candidate != Actor)
+				{
+					return nullptr;
+				}
+				Candidate = Actor;
 			}
 		}
 
-		return nullptr;
+		return Candidate;
 	}
 
 	UClass* ResolveActorClass(const FString& ClassText)
@@ -645,6 +664,7 @@ namespace
 		ActorJson->SetStringField(TEXT("label"), Actor->GetActorLabel());
 		ActorJson->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
 		ActorJson->SetStringField(TEXT("path"), Actor->GetPathName());
+		ActorJson->SetStringField(TEXT("actorPath"), Actor->GetPathName());
 
 		const FName FolderPath = Actor->GetFolderPath();
 		ActorJson->SetStringField(TEXT("folderPath"), FolderPath.IsNone() ? FString() : FolderPath.ToString());
@@ -1766,6 +1786,7 @@ namespace WorldDataMCP
 			};
 
 			AddStep(TEXT("worlddata://project/info"), TEXT("Verify project identity and the active MCP endpoint."));
+			AddStep(TEXT("worlddata://mcp/governance"), TEXT("Inspect the enforced tool-risk and approval policy before requesting changes."));
 			AddStep(TEXT("worlddata://codex/policy-snapshot"), TEXT("Inspect explicit local Codex approval, sandbox, model, and MCP configuration, if present."));
 			AddStep(TEXT("worlddata://editor/selection"), TEXT("See what the user currently has selected to act in context."));
 			AddStep(TEXT("worlddata://level/actors"), TEXT("Understand the current editor world before spawning or selecting actors."));

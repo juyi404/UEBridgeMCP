@@ -40,7 +40,6 @@ public:
 	{
 		UToolMenus::UnRegisterStartupCallback(this);
 		UToolMenus::UnregisterOwner(this);
-
 		if (FSlateApplication::IsInitialized())
 		{
 			FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UEBridgeMCP::PanelTabName);
@@ -67,8 +66,8 @@ private:
 			FToolMenuSection& Section = Menu->FindOrAddSection("WindowLayout");
 			Section.AddMenuEntry(
 				FName(TEXT("UEBridgeMCP_OpenPanel")),
-				LOCTEXT("OpenPanelMenuLabel", "WorldData MCP 控制台"),
-				LOCTEXT("OpenPanelMenuTooltip", "打开 WorldData MCP 控制台。"),
+				LOCTEXT("OpenPanelMenuLabel", "打开 WorldData MCP 控制台"),
+				LOCTEXT("OpenPanelMenuTooltip", "以可停靠标签页打开或聚焦 WorldData MCP 控制台。"),
 				FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Details"),
 				FUIAction(FExecuteAction::CreateRaw(this, &FUEBridgeMCPEditorModule::OpenPanel)));
 		}

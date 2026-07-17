@@ -1,14 +1,18 @@
 #pragma once
 
-#include "WorldDataCodexACPClient.h"
+#include "WorldDataAgentBackend.h"
+#include "WorldDataAgentBackendFactory.h"
 #include "WorldDataMCPServer.h"
 #include "UEBridgeMCPStyle.h"
 
 #include "Framework/Application/SlateApplication.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
+#include "Misc/MessageDialog.h"
 #include "Misc/Paths.h"
 #include "Policies/PrettyJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
@@ -53,21 +57,27 @@ public:
 		RefreshCliDetections();
 		ConfigureLightTextBoxStyle();
 		ConfigureComposerButtonStyle();
-		AcpClient = MakeShared<FWorldDataCodexACPClient>();
-		AcpClient->SetPermissionMode(CurrentMode);
-		AcpClient->OnText.BindSP(this, &SUEBridgeMCPPanel::HandleAcpText);
-		AcpClient->OnStatus.BindSP(this, &SUEBridgeMCPPanel::HandleAcpStatus);
-		AcpClient->OnError.BindSP(this, &SUEBridgeMCPPanel::HandleAcpError);
-		AcpClient->OnPermission.BindSP(this, &SUEBridgeMCPPanel::HandleAcpPermission);
+		AgentBackend = FWorldDataAgentBackendFactory::CreateConfiguredBackend();
+		AgentBackend->SetPermissionMode(CurrentMode);
+		AgentBackend->OnText.BindSP(this, &SUEBridgeMCPPanel::HandleAcpText);
+		AgentBackend->OnStatus.BindSP(this, &SUEBridgeMCPPanel::HandleAcpStatus);
+		AgentBackend->OnError.BindSP(this, &SUEBridgeMCPPanel::HandleAcpError);
+		AgentBackend->OnPermission.BindSP(this, &SUEBridgeMCPPanel::HandleAcpPermission);
 
 		ChildSlot
 		[
 			SNew(SBorder)
-			.Padding(0.0f)
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-			.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+			.Padding(18.0f)
+			.BorderImage(&HtmlShellBrush)
+			.BorderBackgroundColor(FSlateColor(UEBridgeMCP::Palette::SurfaceRaised()))
 			[
-				BuildUEBridgeStyleLayout()
+				SNew(SBorder)
+				.Padding(0.0f)
+				.BorderImage(&HtmlShellBrush)
+				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					BuildHtmlParityLayout()
+				]
 			]
 		];
 
@@ -76,9 +86,9 @@ public:
 
 	~SUEBridgeMCPPanel()
 	{
-		if (AcpClient.IsValid())
+		if (AgentBackend.IsValid())
 		{
-			AcpClient->Stop();
+			AgentBackend->Stop();
 		}
 	}
 
@@ -109,11 +119,676 @@ private:
 	{
 		FText Title;
 		FDateTime CreatedAt = FDateTime::Now();
+		FString TaskId;
+		FString ThreadId;
 		bool bHasCustomTitle = false;
 		TArray<FConversationMessage> Messages;
 		FString Transcript;
 		int32 ActiveAssistantMessageIndex = INDEX_NONE;
 	};
+
+	FSlateFontInfo GetHtmlParityFont(const int32 Size, const bool bBold = false) const
+	{
+		FSlateFontInfo Font = FAppStyle::GetFontStyle(bBold ? "NormalFontBold" : "NormalFont");
+		Font.Size = Size;
+		return Font;
+	}
+
+	// Slate parity layer for Tools/ue-bridge-preview/index.html. The underlying
+	// server, ACP and conversation logic remains shared with the legacy layout.
+	TSharedRef<SWidget> BuildHtmlParityLayout()
+	{
+		return SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				BuildHtmlParitySidebar()
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				SNew(SBox)
+				.WidthOverride(1.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.FillWidth(1.0f)
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					BuildHtmlParityTopBar()
+				]
+				+ SVerticalBox::Slot()
+				.FillHeight(1.0f)
+				[
+					BuildHtmlParityMainArea()
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityTopBar()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SBorder)
+				.Padding(FMargin(24.0f, 12.0f))
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					SNew(SBox)
+					.MinDesiredHeight(56.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(SVerticalBox)
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HtmlParityEyebrow", "WORLDDATA / CODEX"))
+								.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+								.Font(GetHtmlParityFont(12, true))
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(0.0f, 1.0f, 0.0f, 0.0f)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HtmlParityConversationTitle", "Codex 会话"))
+								.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+								.Font(GetHtmlParityFont(18, true))
+							]
+							+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(0.0f, 2.0f, 0.0f, 0.0f)
+							[
+								SNew(SHorizontalBox)
+								+ SHorizontalBox::Slot()
+								.AutoWidth()
+								.VAlign(VAlign_Center)
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT("HtmlParityConnectionDot", "●"))
+									.ColorAndOpacity_Lambda([] { return UEBridgeMCP::GetStatusColor(); })
+								]
+								+ SHorizontalBox::Slot()
+								.AutoWidth()
+								.VAlign(VAlign_Center)
+								.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+								[
+									SNew(STextBlock)
+									.Text_Lambda([]
+									{
+										return FText::FromString(FString::Printf(TEXT("MCP 服务%s :%d"),
+											FWorldDataMCPServer::IsRunning() ? TEXT("已连接") : TEXT("未运行"),
+											FWorldDataMCPServer::IsRunning() ? FWorldDataMCPServer::GetPort() : FWorldDataMCPServer::LoadConfiguredPort()));
+									})
+									.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+									.Font(GetHtmlParityFont(12))
+								]
+							]
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(6.0f, 0.0f)
+						[
+							BuildToolbarButton(LOCTEXT("HtmlParityCopyUrl", "复制连接地址"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnCopyUrlClicked))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+						[
+							BuildToolbarButton(LOCTEXT("HtmlParitySetupCli", "一键配置 CLI"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnSetupCliClicked))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+						[
+							BuildToolbarButton(LOCTEXT("HtmlParityRefresh", "刷新"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnRefreshClicked), TAttribute<bool>::CreateLambda([] { return FWorldDataMCPServer::IsRunning(); }))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+						[
+							BuildToolbarButton(LOCTEXT("HtmlParitySettings", "设置"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnSettingsClicked))
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						[
+							BuildHtmlParityStatusPill()
+						]
+					]
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SBox)
+				.HeightOverride(1.0f)
+				[
+					SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+					.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityStatusPill() const
+	{
+		return SNew(SBorder)
+			.Padding(FMargin(9.0f, 4.0f))
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor_Lambda([this]
+			{
+				const FLinearColor StatusColor = AgentBackend.IsValid() && AgentBackend->IsProcessing()
+					? UEBridgeMCP::Palette::Warning()
+					: (HasRetryableError() ? UEBridgeMCP::Palette::Danger() : UEBridgeMCP::Palette::Success());
+				return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBackgroundColor(), StatusColor, 0.10f));
+			})
+			[
+				SNew(STextBlock)
+				.Text_Lambda([this]
+				{
+					if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
+					{
+						return LOCTEXT("HtmlParityProcessingState", "● 处理中");
+					}
+					return HasRetryableError() ? LOCTEXT("HtmlParityRetryState", "● 需要重试") : LOCTEXT("HtmlParityReadyState", "● 已就绪");
+				})
+				.ColorAndOpacity_Lambda([this]
+				{
+					if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
+					{
+						return FSlateColor(UEBridgeMCP::Palette::Warning());
+					}
+					return FSlateColor(HasRetryableError() ? UEBridgeMCP::Palette::Danger() : UEBridgeMCP::Palette::Success());
+				})
+				.Font(GetHtmlParityFont(12, true))
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParitySidebarAction(const FText& Icon, const FText& Label, FOnClicked OnClicked, TAttribute<bool> bActive) const
+	{
+		return SNew(SButton)
+			.ButtonStyle(&ComposerButtonStyle)
+			.ButtonColorAndOpacity_Lambda([this, bActive]
+			{
+				return FSlateColor(bActive.Get() ? GetAccentFillColor(0.14f) : GetPanelBackgroundColor());
+			})
+			.ForegroundColor_Lambda([this, bActive]
+			{
+				return FSlateColor(bActive.Get() ? GetEffectiveAccentColor() : GetPanelTextColor());
+			})
+			.ContentPadding(FMargin(10.0f, 8.0f))
+			.HAlign(HAlign_Left)
+			.OnClicked(OnClicked)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(Icon)
+					.ColorAndOpacity_Lambda([this, bActive] { return FSlateColor(bActive.Get() ? GetEffectiveAccentColor() : GetPanelSubduedTextColor()); })
+					.Font(GetHtmlParityFont(14))
+				]
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				.Padding(9.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text(Label)
+					.ColorAndOpacity_Lambda([this, bActive] { return FSlateColor(bActive.Get() ? GetEffectiveAccentColor() : GetPanelTextColor()); })
+					.Font(GetHtmlParityFont(14))
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParitySidebar()
+	{
+		return SNew(SBorder)
+			.Padding(0.0f)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+			[
+				SNew(SBox)
+				.WidthOverride(272.0f)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(SBorder)
+						.Padding(FMargin(18.0f, 18.0f, 18.0f, 16.0f))
+						.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+						.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.VAlign(VAlign_Center)
+							[
+								SNew(SBorder)
+								.Padding(FMargin(7.0f, 5.0f))
+								.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+								.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentButtonColor()); })
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT("HtmlParityBrandMark", "WD"))
+									.ColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentButtonTextColor()); })
+									.Font(GetHtmlParityFont(13, true))
+								]
+							]
+							+ SHorizontalBox::Slot()
+							.FillWidth(1.0f)
+							.VAlign(VAlign_Center)
+							.Padding(9.0f, 0.0f, 0.0f, 0.0f)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HtmlParityBrandName", "Unlimited.AI"))
+								.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+								.Font(GetHtmlParityFont(15, true))
+							]
+							+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.VAlign(VAlign_Center)
+							.Padding(5.0f, 0.0f, 0.0f, 0.0f)
+							[
+								SNew(STextBlock)
+								.Text(LOCTEXT("HtmlParityBrandChevron", "⌄"))
+								.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+							]
+						]
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(SBox)
+						.HeightOverride(1.0f)
+						[
+							SNew(SBorder).BorderImage(FAppStyle::GetBrush("WhiteBrush")).BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+						]
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(9.0f, 9.0f, 9.0f, 10.0f)
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)
+						[
+							BuildHtmlParitySidebarAction(LOCTEXT("HtmlParityNewIcon", "+"), LOCTEXT("HtmlParityNewChat", "新建会话"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnNewConversationClicked), TAttribute<bool>(false))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 3.0f)
+						[
+							BuildHtmlParitySidebarAction(LOCTEXT("HtmlParitySettingsIcon", "*"), LOCTEXT("HtmlParitySettingsAction", "设置"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnSettingsClicked), TAttribute<bool>::CreateLambda([this] { return bShowSettings; }))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							BuildHtmlParitySidebarAction(LOCTEXT("HtmlParityChatIcon", "o"), LOCTEXT("HtmlParityChatAction", "聊天"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnShowChatClicked), TAttribute<bool>::CreateLambda([this] { return !bShowSettings; }))
+						]
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(17.0f, 5.0f, 17.0f, 6.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().FillWidth(1.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("HtmlParityHistoryTitle", "聊天记录")).ColorAndOpacity(FSlateColor(GetPanelSubduedTextColor())).Font(GetHtmlParityFont(13, true))
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							SNew(STextBlock).Text_Lambda([this] { return FText::FromString(FString::Printf(TEXT("%d 个会话"), Conversations.Num())); }).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(12))
+						]
+					]
+					+ SVerticalBox::Slot()
+					.FillHeight(1.0f)
+					.Padding(7.0f, 0.0f, 7.0f, 10.0f)
+					[
+						SAssignNew(SidebarListScrollBox, SScrollBox)
+					]
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityMainArea()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			[
+				SNew(SBorder)
+				.Padding(FMargin(24.0f, 18.0f, 24.0f, 14.0f))
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					SNew(SWidgetSwitcher)
+					.WidgetIndex_Lambda([this]
+					{
+						if (bShowSettings)
+						{
+							return 2;
+						}
+						return bShowDetail ? 1 : 0;
+					})
+					+ SWidgetSwitcher::Slot()
+					[
+						BuildHtmlParityEmptyChat()
+					]
+					+ SWidgetSwitcher::Slot()
+					[
+						BuildHtmlParityConversationContent()
+					]
+					+ SWidgetSwitcher::Slot()
+					[
+						BuildSettingsPanel()
+					]
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(24.0f, 0.0f, 24.0f, 16.0f)
+			[
+				BuildHtmlParityComposer()
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityEmptyChat()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				BuildHtmlParityPreviewNotice()
+			]
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(0.0f, 16.0f)
+			[
+				SNew(SBorder)
+					.Padding(1.0f)
+					.BorderImage(&HtmlLargeCardBrush)
+					.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentBorderColor()); })
+					[
+						SNew(SBorder)
+						.Padding(24.0f)
+						.BorderImage(&HtmlLargeCardBrush)
+						.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBackgroundColor(), GetEffectiveAccentColor(), 0.025f)); })
+						[
+							SNew(SBox)
+							.HAlign(HAlign_Center)
+							.VAlign(VAlign_Center)
+							[
+								SNew(SVerticalBox)
+								+ SVerticalBox::Slot()
+								.AutoHeight()
+								.HAlign(HAlign_Center)
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT("HtmlParityEmptyPrompt", "今天我能帮您做什么？"))
+									.ColorAndOpacity(FSlateColor(GetPanelSubduedTextColor()))
+									.Font(GetHtmlParityFont(16))
+								]
+								+ SVerticalBox::Slot()
+								.AutoHeight()
+								.HAlign(HAlign_Center)
+								.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+								[
+									SNew(STextBlock)
+									.Text(LOCTEXT("HtmlParityEmptyHelp", "发送消息后，Codex 会话、工具事件与权限确认会显示在这里。"))
+									.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+									.Font(GetHtmlParityFont(13))
+								]
+							]
+						]
+					]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityPreviewNotice()
+	{
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(&HtmlCardBrush)
+			.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+			[
+				SNew(SBorder)
+				.Padding(FMargin(11.0f, 9.0f))
+				.BorderImage(&HtmlCardBrush)
+				.BorderBackgroundColor(FSlateColor(GetPanelSurfaceColor()))
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(SBorder).Padding(7.0f, 4.0f).BorderImage(FAppStyle::GetBrush("WhiteBrush")).BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentFillColor(0.12f)); })
+						[
+							SNew(STextBlock).Text(LOCTEXT("HtmlParityNoticeMark", "C")).ColorAndOpacity_Lambda([this] { return FSlateColor(GetEffectiveAccentColor()); }).Font(GetHtmlParityFont(13, true))
+						]
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f).Padding(10.0f, 0.0f, 0.0f, 0.0f)
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(STextBlock).Text(LOCTEXT("HtmlParityNoticeTitle", "预览环境")).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(GetHtmlParityFont(13, true))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 1.0f, 0.0f, 0.0f)
+						[
+							SNew(STextBlock).Text(LOCTEXT("HtmlParityNoticeBody", "此处展示本地交互原型；连接 UE 后，服务状态、工具结果与会话内容会实时同步。"))
+							.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(12))
+						]
+					]
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityConversationContent()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			[
+				SNew(SBox)
+				.Visibility_Lambda([this] { return bDetailIsConversation ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					BuildHtmlParityPreviewNotice()
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+			[
+				SNew(SBox)
+				.Visibility_Lambda([this] { return HasPendingMcpApproval() ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					BuildMcpApprovalCard()
+				]
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+			[
+				SNew(SBox)
+				.Visibility_Lambda([this] { return bHasPendingPermission ? EVisibility::Visible : EVisibility::Collapsed; })
+				[
+					BuildPermissionRequestCard()
+				]
+			]
+			+ SVerticalBox::Slot()
+			.FillHeight(1.0f)
+			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+			[
+				SAssignNew(ContentSwitcher, SWidgetSwitcher)
+				.WidgetIndex_Lambda([this] { return bDetailIsConversation ? 0 : 1; })
+				+ SWidgetSwitcher::Slot()
+				[
+					BuildConversationMessagesView()
+				]
+				+ SWidgetSwitcher::Slot()
+				[
+					BuildHtmlParityDetailView()
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityDetailView()
+	{
+		return SNew(SVerticalBox)
+			+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+				[
+					SAssignNew(DetailTitleText, STextBlock).Text(LOCTEXT("HtmlParityDetailTitle", "服务详情")).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(FAppStyle::GetFontStyle("NormalFontBold"))
+				]
+				+ SHorizontalBox::Slot().AutoWidth()
+				[
+					BuildToolbarButton(LOCTEXT("HtmlParityCopyCurrent", "复制当前内容"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnCopyCurrentClicked))
+				]
+			]
+			+ SVerticalBox::Slot().FillHeight(1.0f)
+			[
+				SAssignNew(DetailTextBox, SMultiLineEditableTextBox)
+				.IsReadOnly(true).AutoWrapText(false).Style(&LightTextBoxStyle)
+				.BackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				.ForegroundColor(FSlateColor(GetPanelTextColor()))
+				.ReadOnlyForegroundColor(FSlateColor(GetPanelTextColor()))
+				.Font(FAppStyle::GetFontStyle("MonospacedText"))
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityContextChip(const FText& Label, const FText& Value, const FText& Tooltip, const FText& Detail = FText::GetEmpty()) const
+	{
+		return SNew(SBorder)
+			.Padding(FMargin(8.0f, 4.0f))
+			.BorderImage(&HtmlControlBrush)
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentFillColor(0.06f)); })
+			.ToolTipText(Tooltip)
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Text(Label).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(11, true))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock).Text(Value).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(GetHtmlParityFont(12))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(5.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(SBox)
+					.Visibility(Detail.IsEmpty() ? EVisibility::Collapsed : EVisibility::Visible)
+					[
+						SNew(SBorder).Padding(FMargin(4.0f, 1.0f)).BorderImage(FAppStyle::GetBrush("WhiteBrush")).BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+						[
+							SNew(STextBlock).Text(Detail).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(11))
+						]
+					]
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildHtmlParityComposer()
+	{
+		// The parent slot provides the horizontal inset; the composer should remain
+		// compact so the conversation retains the visual focus.
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(&HtmlLargeCardBrush)
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentBorderColor()); })
+			[
+				SNew(SBorder)
+				.Padding(FMargin(10.0f, 6.0f))
+				.BorderImage(&HtmlLargeCardBrush)
+				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(SBox).HeightOverride(52.0f)
+							[
+								SAssignNew(ComposerTextBox, SMultiLineEditableTextBox)
+								.Style(&LightTextBoxStyle)
+								.HintText(LOCTEXT("HtmlParityComposerHint", "输入消息…（Enter 发送，Shift + Enter 换行）"))
+								.AutoWrapText(true)
+								.BackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+								.ForegroundColor(FSlateColor(GetPanelTextColor()))
+							]
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 8.0f, 0.0f)
+							[
+								BuildIconTextButton(LOCTEXT("HtmlParityOpenProject", "+"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnOpenProjectFolderClicked), LOCTEXT("HtmlParityOpenProjectTooltip", "打开项目目录（附件发送尚未实现）"))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 7.0f, 0.0f)
+							[
+								BuildHtmlParityContextChip(LOCTEXT("HtmlParityCliLabel", "Backend"), FText::FromString(AgentBackend.IsValid() ? AgentBackend->GetDisplayName() : TEXT("Unavailable")), LOCTEXT("HtmlParityCliTooltip", "The conversation backend is selected independently from the HTTP MCP automation server."))
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 7.0f, 0.0f)
+							[
+								BuildModeCombo()
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+							[
+								BuildHtmlParityContextChip(LOCTEXT("HtmlParityModelLabel", "Protocol"), FText::FromString(AgentBackend.IsValid() && AgentBackend->GetBackendId() == TEXT("codex_app_server") ? TEXT("Codex app-server JSONL") : TEXT("Adapter-defined")), LOCTEXT("HtmlParityModelTooltip", "ACP features are adapter-defined. Codex app-server uses independent JSON-RPC thread and turn messages."))
+							]
+							+ SHorizontalBox::Slot().FillWidth(1.0f)
+							[
+								SNullWidget::NullWidget
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(7.0f, 0.0f, 0.0f, 0.0f)
+							[
+								SNew(SBox).Visibility_Lambda([this] { return HasRetryableError() ? EVisibility::Visible : EVisibility::Collapsed; })
+								[
+									BuildToolbarButton(LOCTEXT("HtmlParityRetry", "重试"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnRetryConversationClicked))
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f, 0.0f, 0.0f)
+							[
+								SNew(SButton)
+								.HAlign(HAlign_Center).VAlign(VAlign_Center)
+								.ContentPadding(FMargin(12.0f, 4.0f))
+								.ButtonStyle(&ComposerButtonStyle)
+								.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentButtonColor()); })
+								.ForegroundColor_Lambda([this] { return FSlateColor(GetAccentButtonTextColor()); })
+								.OnClicked(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnSendClicked))
+								[
+							SNew(STextBlock).Text(LOCTEXT("HtmlParitySend", "发送")).ColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentButtonTextColor()); }).Font(GetHtmlParityFont(12, true))
+								]
+							]
+						]
+				]
+			];
+	}
+
+	bool HasRetryableError() const
+	{
+		return (!AgentBackend.IsValid() || !AgentBackend->IsProcessing())
+			&& ConversationMessages.ContainsByPredicate([](const FConversationMessage& Message)
+			{
+				return Message.Role == EConversationMessageRole::Error;
+			});
+	}
 
 	TSharedRef<SWidget> BuildUEBridgeStyleLayout()
 	{
@@ -166,7 +841,7 @@ private:
 					.AutoWidth()
 					[
 						SNew(SBox)
-						.WidthOverride(288.0f)
+						.WidthOverride(252.0f)
 						[
 							SNew(SHorizontalBox)
 							+ SHorizontalBox::Slot()
@@ -275,7 +950,7 @@ private:
 			.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
 			[
 				SNew(SBox)
-				.WidthOverride(288.0f)
+				.WidthOverride(252.0f)
 				[
 					SNew(SVerticalBox)
 					+ SVerticalBox::Slot()
@@ -386,14 +1061,14 @@ private:
 	TSharedRef<SWidget> BuildBadge(const FText& Text) const
 	{
 		return SNew(SBorder)
-			.Padding(8.0f, 2.0f)
+			.Padding(9.0f, 4.0f)
 			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
 			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentFillColor(0.22f)); })
 			[
 				SNew(STextBlock)
 				.Text(Text)
 				.ColorAndOpacity_Lambda([this] { return FSlateColor(GetReadableAccentTextColor()); })
-				.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+				.Font(GetHtmlParityFont(12, true))
 			];
 	}
 
@@ -404,9 +1079,15 @@ private:
 			.ButtonStyle(&ComposerButtonStyle)
 			.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
 			.ForegroundColor(FSlateColor(GetPanelTextColor()))
-			.Text(Label)
+			.ContentPadding(FMargin(10.0f, 5.0f))
 			.IsEnabled(bIsEnabled)
-			.OnClicked(OnClicked);
+			.OnClicked(OnClicked)
+			[
+				SNew(STextBlock)
+				.Text(Label)
+				.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+				.Font(GetHtmlParityFont(12))
+			];
 	}
 
 	TSharedRef<SWidget> BuildIconTextButton(const FText& Label, FOnClicked OnClicked, const FText& Tooltip = FText::GetEmpty()) const
@@ -416,10 +1097,15 @@ private:
 			.ButtonStyle(&ComposerButtonStyle)
 			.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
 			.ForegroundColor(FSlateColor(GetPanelTextColor()))
-			.ContentPadding(FMargin(10.0f, 3.0f))
-			.Text(Label)
+			.ContentPadding(FMargin(10.0f, 5.0f))
 			.ToolTipText(Tooltip)
-			.OnClicked(OnClicked);
+			.OnClicked(OnClicked)
+			[
+				SNew(STextBlock)
+				.Text(Label)
+				.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+				.Font(GetHtmlParityFont(13))
+			];
 	}
 
 	TSharedRef<SWidget> BuildModeCombo()
@@ -440,8 +1126,19 @@ private:
 				.VAlign(VAlign_Center)
 				[
 					SNew(STextBlock)
+					.Text(LOCTEXT("ModeComboLabel", "模式"))
+					.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+					.Font(GetHtmlParityFont(11, true))
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
 					.Text_Lambda([this] { return GetModeLabel(CurrentMode); })
 					.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+					.Font(GetHtmlParityFont(12))
 				]
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
@@ -451,6 +1148,7 @@ private:
 					SNew(STextBlock)
 					.Text(LOCTEXT("ModeComboChevron", "v"))
 					.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+					.Font(GetHtmlParityFont(11))
 				]
 			]
 			.MenuContent()
@@ -463,7 +1161,7 @@ private:
 	{
 		return SNew(SBorder)
 			.Padding(1.0f)
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderImage(&HtmlLargeCardBrush)
 			.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
 			[
 				SNew(SBorder)
@@ -515,9 +1213,9 @@ private:
 			.OnMouseButtonDown_Lambda([this, Mode](const FGeometry&, const FPointerEvent&)
 			{
 				CurrentMode = Mode;
-				if (AcpClient.IsValid())
+				if (AgentBackend.IsValid())
 				{
-					AcpClient->SetPermissionMode(CurrentMode);
+					AgentBackend->SetPermissionMode(CurrentMode);
 				}
 				SetLastAction(FText::Format(LOCTEXT("ModeChangedAction", "已切换到：{0}"), GetModeLabel(CurrentMode)));
 				FSlateApplication::Get().DismissAllMenus();
@@ -579,52 +1277,57 @@ private:
 	TSharedRef<SWidget> BuildConversationItem(const FText& Title, TAttribute<FText> Age, bool bActive, FOnClicked OnClicked = FOnClicked()) const
 	{
 		const bool bClickable = OnClicked.IsBound();
-		return SNew(SBorder)
-			.Padding(0.0f)
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+		return SNew(SButton)
+			.ButtonStyle(&ComposerButtonStyle)
+			.ContentPadding(FMargin(0.0f))
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Fill)
 			.Cursor(bClickable ? EMouseCursor::Hand : EMouseCursor::Default)
-			.BorderBackgroundColor_Lambda([this, bActive] { return FSlateColor(bActive ? GetAccentFillColor(0.22f) : FLinearColor::Transparent); })
-			.OnMouseButtonDown_Lambda([OnClicked](const FGeometry&, const FPointerEvent&)
-			{
-				return OnClicked.IsBound() ? OnClicked.Execute() : FReply::Unhandled();
-			})
+			.IsEnabled(bClickable)
+			.OnClicked(OnClicked)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				[
-					SNew(SBox)
-					.WidthOverride(3.0f)
-					[
-						SNew(SBorder)
-						.Padding(0.0f)
-						.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-						.BorderBackgroundColor_Lambda([this, bActive] { return FSlateColor(bActive ? GetEffectiveAccentColor() : FLinearColor::Transparent); })
-					]
-				]
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				.Padding(8.0f, 7.0f, 8.0f, 7.0f)
+				SNew(SBorder)
+				.Padding(0.0f)
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor_Lambda([this, bActive] { return FSlateColor(bActive ? GetAccentFillColor(0.22f) : FLinearColor::Transparent); })
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot()
-					.FillWidth(1.0f)
-					.VAlign(VAlign_Center)
+					.AutoWidth()
 					[
-						SNew(STextBlock)
-						.Text(Title)
-						.ColorAndOpacity_Lambda([this, bActive] { return FSlateColor(bActive ? GetEffectiveAccentColor() : GetReadableAccentTextColor()); })
-						.Font(bActive ? FAppStyle::GetFontStyle("NormalFontBold") : FAppStyle::GetFontStyle("NormalFont"))
-						.AutoWrapText(false)
+						SNew(SBox)
+						.WidthOverride(3.0f)
+						[
+							SNew(SBorder)
+							.Padding(0.0f)
+							.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+							.BorderBackgroundColor_Lambda([this, bActive] { return FSlateColor(bActive ? GetEffectiveAccentColor() : FLinearColor::Transparent); })
+						]
 					]
 					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.VAlign(VAlign_Center)
-					.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+					.FillWidth(1.0f)
+					.Padding(8.0f, 7.0f, 8.0f, 7.0f)
 					[
-						SNew(STextBlock)
-						.Text(Age)
-						.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot()
+						.FillWidth(1.0f)
+						.VAlign(VAlign_Center)
+						[
+							SNew(STextBlock)
+							.Text(Title)
+							.ColorAndOpacity_Lambda([this, bActive] { return FSlateColor(bActive ? GetEffectiveAccentColor() : GetReadableAccentTextColor()); })
+							.Font(bActive ? FAppStyle::GetFontStyle("NormalFontBold") : FAppStyle::GetFontStyle("NormalFont"))
+							.AutoWrapText(false)
+						]
+						+ SHorizontalBox::Slot()
+						.AutoWidth()
+						.VAlign(VAlign_Center)
+						.Padding(8.0f, 0.0f, 0.0f, 0.0f)
+						[
+							SNew(STextBlock)
+							.Text(Age)
+							.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
+						]
 					]
 				]
 			];
@@ -696,8 +1399,14 @@ private:
 			];
 	}
 
-	TSharedRef<SWidget> BuildConversationMessageWidget(const FConversationMessage& Message) const
+	TSharedRef<SWidget> BuildConversationMessageWidget(const int32 MessageIndex) const
 	{
+		if (!ConversationMessages.IsValidIndex(MessageIndex))
+		{
+			return SNullWidget::NullWidget;
+		}
+
+		const FConversationMessage& Message = ConversationMessages[MessageIndex];
 		const bool bUser = Message.Role == EConversationMessageRole::User;
 		const EHorizontalAlignment BubbleAlign = bUser ? HAlign_Right : HAlign_Left;
 		const FString DisplayText = Message.Text.IsEmpty() && Message.bStreaming
@@ -708,7 +1417,7 @@ private:
 			.HAlign(BubbleAlign)
 			[
 				SNew(SBox)
-				.MaxDesiredWidth(860.0f)
+				.MaxDesiredWidth(Message.Role == EConversationMessageRole::Error ? 460.0f : 860.0f)
 				[
 					SNew(SBorder)
 					.Padding(1.0f)
@@ -734,7 +1443,18 @@ private:
 							.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 							[
 								SNew(STextBlock)
-								.Text(FText::FromString(DisplayText))
+								.Text_Lambda([this, MessageIndex, DisplayText]()
+								{
+									if (!ConversationMessages.IsValidIndex(MessageIndex))
+									{
+										return FText::FromString(DisplayText);
+									}
+
+									const FConversationMessage& CurrentMessage = ConversationMessages[MessageIndex];
+									return CurrentMessage.Text.IsEmpty() && CurrentMessage.bStreaming
+										? LOCTEXT("ConversationThinking", "正在思考...")
+										: FText::FromString(CurrentMessage.Text);
+								})
 								.ColorAndOpacity(FSlateColor(GetConversationMessageTextColor(Message.Role)))
 								.AutoWrapText(true)
 							]
@@ -822,12 +1542,12 @@ private:
 		return SNew(SBorder)
 			.Padding(1.0f)
 			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentBorderColor()); })
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBorderColor(), UEBridgeMCP::Palette::Warning(), 0.55f)); })
 			[
 				SNew(SBorder)
 				.Padding(FMargin(12.0f, 10.0f))
 				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-				.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentSurfaceColor()); })
+				.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBackgroundColor(), UEBridgeMCP::Palette::Warning(), 0.09f)); })
 				[
 					SNew(SHorizontalBox)
 					+ SHorizontalBox::Slot()
@@ -878,18 +1598,18 @@ private:
 					.Padding(12.0f, 0.0f, 6.0f, 0.0f)
 					[
 						BuildPermissionActionButton(
-							LOCTEXT("PermissionAllowButton", "允许"),
-							true,
-							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnAllowPermissionClicked))
+							LOCTEXT("PermissionDenyButton", "拒绝"),
+							false,
+							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnDenyPermissionClicked))
 					]
 					+ SHorizontalBox::Slot()
 					.AutoWidth()
 					.VAlign(VAlign_Center)
 					[
 						BuildPermissionActionButton(
-							LOCTEXT("PermissionDenyButton", "拒绝"),
-							false,
-							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnDenyPermissionClicked))
+							LOCTEXT("PermissionAllowButton", "允许"),
+							true,
+							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnAllowPermissionClicked))
 					]
 				]
 			];
@@ -1144,11 +1864,194 @@ private:
 				[
 					BuildServerPortCard()
 				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 10.0f, 0.0f, 0.0f)
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 10.0f, 0.0f, 0.0f)
+			[
+				BuildRegisteredToolsCard()
+			]
+			+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 10.0f, 0.0f, 0.0f)
+			[
+				BuildSecurityCard()
+			]
+			];
+	}
+
+	bool GetNextMcpApproval(FWorldDataMCPApprovalSummary& OutApproval) const
+	{
+		const TArray<FWorldDataMCPApprovalSummary> Approvals = FWorldDataMCPServer::GetPendingApprovals();
+		if (Approvals.IsEmpty())
+		{
+			return false;
+		}
+		OutApproval = Approvals[0];
+		return true;
+	}
+
+	bool HasPendingMcpApproval() const
+	{
+		FWorldDataMCPApprovalSummary Approval;
+		return GetNextMcpApproval(Approval);
+	}
+
+	TSharedRef<SWidget> BuildMcpApprovalCard()
+	{
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBorderColor(), UEBridgeMCP::Palette::Warning(), 0.70f)); })
+			[
+				SNew(SBorder)
+				.Padding(FMargin(12.0f, 10.0f))
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBackgroundColor(), UEBridgeMCP::Palette::Warning(), 0.12f)); })
 				[
-					BuildRegisteredToolsCard()
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
+					[
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(STextBlock)
+							.Text(LOCTEXT("McpApprovalCardTitle", "MCP Change Approval"))
+							.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
+						[
+							SNew(STextBlock)
+							.Text_Lambda([this]
+							{
+								FWorldDataMCPApprovalSummary Approval;
+								if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
+								return FText::FromString(FString::Printf(TEXT("Tool: %s  |  Risk: %s  |  Expires UTC: %s"), *Approval.ToolName, *Approval.Risk, *Approval.ExpiresAtUtc.ToIso8601()));
+							})
+							.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+						]
+						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+						[
+							SNew(STextBlock)
+							.AutoWrapText(true)
+							.Text_Lambda([this]
+							{
+								FWorldDataMCPApprovalSummary Approval;
+								if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
+								const FString Status = Approval.bReadyForDecision ? TEXT("Ready for decision") : TEXT("Capturing target revision");
+								return FText::FromString(FString::Printf(TEXT("%s\nChange hash: %s\nTarget revision: %s\n%s"), *Approval.TargetSummary, *Approval.ChangeSummaryHash.Left(16), *Approval.TargetRevision.Left(16), *Status));
+							})
+							.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(12.0f, 0.0f, 6.0f, 0.0f)
+					[
+						SNew(SButton)
+						.ButtonStyle(&ComposerButtonStyle)
+						.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
+						.ForegroundColor_Lambda([this] { return FSlateColor(GetPanelTextColor()); })
+						.ContentPadding(FMargin(12.0f, 4.0f))
+						.OnClicked(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, false))
+						[
+							SNew(STextBlock).Text(LOCTEXT("McpApprovalDeny", "Deny"))
+						]
+					]
+					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+					[
+						SNew(SButton)
+						.ButtonStyle(&ComposerButtonStyle)
+						.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentButtonColor()); })
+						.ForegroundColor_Lambda([this] { return FSlateColor(GetAccentButtonTextColor()); })
+						.ContentPadding(FMargin(12.0f, 4.0f))
+						.IsEnabled_Lambda([this]
+						{
+							FWorldDataMCPApprovalSummary Approval;
+							return GetNextMcpApproval(Approval) && Approval.bReadyForDecision;
+						})
+						.OnClicked(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, true))
+						[
+							SNew(STextBlock).Text(LOCTEXT("McpApprovalApprove", "Approve"))
+						]
+					]
+				]
+			];
+	}
+
+	FReply OnResolveMcpApprovalClicked(bool bApprove)
+	{
+		FWorldDataMCPApprovalSummary Approval;
+		if (!GetNextMcpApproval(Approval))
+		{
+			return FReply::Handled();
+		}
+
+		FString Error;
+		const bool bResolved = FWorldDataMCPServer::ResolvePendingApproval(Approval.ApprovalId, bApprove, Error);
+		SetLastAction(bResolved
+			? (bApprove ? LOCTEXT("McpApprovalGranted", "MCP change approved; the background job has resumed.") : LOCTEXT("McpApprovalDenied", "MCP change denied."))
+			: FText::FromString(Error));
+		return FReply::Handled();
+	}
+
+	TSharedRef<SWidget> BuildSecurityCard()
+	{
+		return SNew(SBorder)
+			.Padding(12.0f)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentFillColor(0.10f)); })
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("SecurityTitle", "Security"))
+						.ColorAndOpacity_Lambda([this] { return FSlateColor(GetReadableAccentTextColor()); })
+						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					]
+					+ SVerticalBox::Slot()
+					.AutoHeight()
+					.Padding(0.0f, 4.0f, 0.0f, 0.0f)
+					[
+						SNew(STextBlock)
+						.AutoWrapText(true)
+						.Text_Lambda([]
+						{
+							return FWorldDataMCPServer::IsUnsafePythonEnabled()
+								? LOCTEXT("UnsafePythonEnabled", "Unsafe Python is enabled for this project. Copying the capability token is an explicit, per-editor-session approval.")
+								: LOCTEXT("UnsafePythonDisabled", "Unsafe Python is disabled. Enable it explicitly with [UEBridgeMCP.Security] bEnableUnsafePython=true in the project configuration.");
+						})
+						.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
+					]
+				]
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.VAlign(VAlign_Center)
+				.Padding(12.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.Padding(0.0f, 0.0f, 6.0f, 0.0f)
+					[
+						BuildToolbarButton(
+							LOCTEXT("RotateMcpToken", "Rotate MCP Token"),
+							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnRotateAccessTokenClicked),
+							TAttribute<bool>::CreateLambda([] { return FWorldDataMCPServer::IsRunning(); }))
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						BuildToolbarButton(
+							LOCTEXT("CopyUnsafePythonToken", "Copy Python Token"),
+							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnCopyUnsafePythonTokenClicked),
+							TAttribute<bool>::CreateLambda([] { return FWorldDataMCPServer::IsUnsafePythonEnabled() && FWorldDataMCPServer::IsRunning(); }))
+					]
 				]
 			];
 	}
@@ -1401,6 +2304,11 @@ private:
 	{
 		if (FWorldDataMCPServer::IsRunning())
 		{
+			const FText Confirmation = LOCTEXT("StopMcpServerConfirmation", "Stopping the MCP server affects every console window and external MCP client. Continue?");
+			if (FMessageDialog::Open(EAppMsgType::YesNo, Confirmation) != EAppReturnType::Yes)
+			{
+				return FReply::Handled();
+			}
 			FWorldDataMCPServer::Stop();
 			SetLastAction(LOCTEXT("McpStoppedAction", "已停止 MCP 服务器。"));
 			return FReply::Handled();
@@ -1483,6 +2391,12 @@ private:
 				.AutoHeight()
 				[
 					BuildCliSettingsRow(ECliTool::Cursor)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 12.0f, 0.0f, 0.0f)
+				[
+					BuildToolbarButton(LOCTEXT("AgentBackendDiagnosticsButton", "Agent Backend Diagnostics"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnShowAgentBackendDiagnosticsClicked))
 				]
 			];
 	}
@@ -1616,7 +2530,7 @@ private:
 			[
 				SNew(SBorder)
 				.Padding(FMargin(12.0f, 8.0f))
-				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderImage(&HtmlLargeCardBrush)
 				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
 				[
 					SNew(SVerticalBox)
@@ -1652,7 +2566,7 @@ private:
 						.Padding(0.0f, 0.0f, 16.0f, 0.0f)
 						[
 							SNew(STextBlock)
-							.Text(LOCTEXT("ModelText", "GPT-5.5"))
+							.Text(LOCTEXT("ModelText", "模型由 Adapter 决定"))
 							.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
 						]
 						+ SHorizontalBox::Slot()
@@ -1702,23 +2616,15 @@ private:
 	void ConfigureLightTextBoxStyle()
 	{
 		LightTextBoxStyle = FAppStyle::Get().GetWidgetStyle<FEditableTextBoxStyle>("NormalEditableTextBox");
-		if (const FSlateBrush* WhiteBrush = FAppStyle::GetBrush("WhiteBrush"))
-		{
-			FSlateBrush NormalBrush = *WhiteBrush;
-			NormalBrush.TintColor = FSlateColor(GetPanelBackgroundColor());
+		const FSlateBrush NormalBrush = FSlateRoundedBoxBrush(FSlateColor(GetPanelBackgroundColor()), 10.0f);
+		const FSlateBrush HoveredBrush = FSlateRoundedBoxBrush(FSlateColor(GetPanelSurfaceColor()), 10.0f);
+		const FSlateBrush FocusedBrush = FSlateRoundedBoxBrush(FSlateColor(GetPanelBackgroundColor()), 10.0f, FSlateColor(GetAccentBorderColor()), 1.0f);
 
-			FSlateBrush HoveredBrush = *WhiteBrush;
-			HoveredBrush.TintColor = FSlateColor(GetPanelSurfaceColor());
-
-			FSlateBrush FocusedBrush = *WhiteBrush;
-			FocusedBrush.TintColor = FSlateColor(GetPanelBackgroundColor());
-
-			LightTextBoxStyle
-				.SetBackgroundImageNormal(NormalBrush)
-				.SetBackgroundImageHovered(HoveredBrush)
-				.SetBackgroundImageFocused(FocusedBrush)
-				.SetBackgroundImageReadOnly(NormalBrush);
-		}
+		LightTextBoxStyle
+			.SetBackgroundImageNormal(NormalBrush)
+			.SetBackgroundImageHovered(HoveredBrush)
+			.SetBackgroundImageFocused(FocusedBrush)
+			.SetBackgroundImageReadOnly(NormalBrush);
 
 		FTextBlockStyle TextStyle = LightTextBoxStyle.TextStyle;
 		TextStyle.SetColorAndOpacity(FSlateColor(GetPanelTextColor()));
@@ -1734,26 +2640,16 @@ private:
 	void ConfigureComposerButtonStyle()
 	{
 		ComposerButtonStyle = FAppStyle::Get().GetWidgetStyle<FButtonStyle>("Button");
-		if (const FSlateBrush* WhiteBrush = FAppStyle::GetBrush("WhiteBrush"))
-		{
-			FSlateBrush NormalBrush = *WhiteBrush;
-			NormalBrush.TintColor = FSlateColor(UEBridgeMCP::Palette::Background());
+		const FSlateBrush NormalBrush = FSlateRoundedBoxBrush(FSlateColor(UEBridgeMCP::Palette::Background()), 7.0f);
+		const FSlateBrush HoveredBrush = FSlateRoundedBoxBrush(FSlateColor(UEBridgeMCP::Palette::ControlHover()), 7.0f);
+		const FSlateBrush PressedBrush = FSlateRoundedBoxBrush(FSlateColor(UEBridgeMCP::Palette::ControlPressed()), 7.0f);
+		const FSlateBrush DisabledBrush = FSlateRoundedBoxBrush(FSlateColor(UEBridgeMCP::Palette::Surface()), 7.0f);
 
-			FSlateBrush HoveredBrush = *WhiteBrush;
-			HoveredBrush.TintColor = FSlateColor(UEBridgeMCP::Palette::ControlHover());
-
-			FSlateBrush PressedBrush = *WhiteBrush;
-			PressedBrush.TintColor = FSlateColor(UEBridgeMCP::Palette::ControlPressed());
-
-			FSlateBrush DisabledBrush = *WhiteBrush;
-			DisabledBrush.TintColor = FSlateColor(UEBridgeMCP::Palette::Surface());
-
-			ComposerButtonStyle
-				.SetNormal(NormalBrush)
-				.SetHovered(HoveredBrush)
-				.SetPressed(PressedBrush)
-				.SetDisabled(DisabledBrush);
-		}
+		ComposerButtonStyle
+			.SetNormal(NormalBrush)
+			.SetHovered(HoveredBrush)
+			.SetPressed(PressedBrush)
+			.SetDisabled(DisabledBrush);
 
 		const FSlateColor TextColor(UEBridgeMCP::Palette::Text());
 		ComposerButtonStyle
@@ -1905,7 +2801,7 @@ private:
 	FText GetCliDescription(ECliTool Tool) const
 	{
 		return Tool == ECliTool::Codex
-			? LOCTEXT("CodexCliDescription", "配置 codex 命令路径；MCP 连接已自动写入 ~/.codex/config.toml（面板对话仍通过 codex-acp 适配器接入）。")
+			? LOCTEXT("CodexCliDescription", "配置 codex 命令路径；MCP 连接写入 Codex 配置。面板对话由选定 Agent Backend 承载。")
 			: LOCTEXT("CursorCliDescription", "配置 Cursor Agent CLI（cursor-agent），并同步写入 .cursor/mcp.json 供 Cursor 读取 MCP。");
 	}
 
@@ -2204,12 +3100,12 @@ private:
 		}
 
 		ConversationScrollBox->ClearChildren();
-		for (const FConversationMessage& Message : ConversationMessages)
+		for (int32 MessageIndex = 0; MessageIndex < ConversationMessages.Num(); ++MessageIndex)
 		{
 			ConversationScrollBox->AddSlot()
 				.Padding(FMargin(0.0f, 0.0f, 0.0f, 10.0f))
 				[
-					BuildConversationMessageWidget(Message)
+					BuildConversationMessageWidget(MessageIndex)
 				];
 		}
 		ConversationScrollBox->ScrollToEnd();
@@ -2224,6 +3120,51 @@ private:
 		const int32 Index = ConversationMessages.Add(MoveTemp(Message));
 		RebuildConversationMessages();
 		return Index;
+	}
+
+	void TrimConversationHistory()
+	{
+		static constexpr int32 MaxMessagesPerConversation = 128;
+		static constexpr int32 MaxMessageCharacters = 128 * 1024;
+		static constexpr int32 MaxTranscriptCharacters = 256 * 1024;
+
+		const int32 RemovedMessageCount = FMath::Max(0, ConversationMessages.Num() - MaxMessagesPerConversation);
+		if (RemovedMessageCount > 0)
+		{
+			ConversationMessages.RemoveAt(0, RemovedMessageCount);
+			if (ActiveAssistantMessageIndex != INDEX_NONE)
+			{
+				ActiveAssistantMessageIndex -= RemovedMessageCount;
+				if (!ConversationMessages.IsValidIndex(ActiveAssistantMessageIndex))
+				{
+					ActiveAssistantMessageIndex = INDEX_NONE;
+				}
+			}
+		}
+
+		for (FConversationMessage& Message : ConversationMessages)
+		{
+			if (Message.Text.Len() > MaxMessageCharacters)
+			{
+				Message.Text = TEXT("[Earlier content in this message was trimmed.]\n")
+					+ Message.Text.Right(MaxMessageCharacters);
+			}
+		}
+
+		if (ConversationTranscript.Len() > MaxTranscriptCharacters)
+		{
+			ConversationTranscript = TEXT("[Earlier conversation content was trimmed to keep this editor session responsive.]\n")
+				+ ConversationTranscript.Right(MaxTranscriptCharacters);
+		}
+	}
+
+	void TrimStoredConversations()
+	{
+		static constexpr int32 MaxStoredConversations = 32;
+		if (Conversations.Num() > MaxStoredConversations)
+		{
+			Conversations.SetNum(MaxStoredConversations);
+		}
 	}
 
 	static FString TrimConversationEventText(const FString& Text)
@@ -2303,6 +3244,7 @@ private:
 			ConversationTranscript += TEXT("\n\n");
 		}
 		ConversationTranscript += FString::Printf(TEXT("你：%s"), *UserMessage);
+		TrimConversationHistory();
 		RefreshConversationText();
 	}
 
@@ -2320,7 +3262,8 @@ private:
 		ConversationMessages[ActiveAssistantMessageIndex].Text += Text;
 		ConversationMessages[ActiveAssistantMessageIndex].bStreaming = true;
 		ConversationTranscript += Text;
-		RefreshConversationText();
+		TrimConversationHistory();
+		RefreshConversationText(false);
 	}
 
 	void AppendConversationEvent(EConversationMessageRole Role, const FString& Text)
@@ -2336,7 +3279,31 @@ private:
 		ConversationTranscript += FString::Printf(TEXT("\n\n[%s] %s\n"),
 			*RoleLabel,
 			*Text);
+		TrimConversationHistory();
 		RefreshConversationText();
+	}
+
+	void FinalizeActiveRequestAsCancelled()
+	{
+		if (!AgentBackend.IsValid() || !AgentBackend->IsProcessing())
+		{
+			return;
+		}
+
+		if (ActiveAssistantMessageIndex != INDEX_NONE && ConversationMessages.IsValidIndex(ActiveAssistantMessageIndex))
+		{
+			ConversationMessages[ActiveAssistantMessageIndex].bStreaming = false;
+		}
+		ActiveAssistantMessageIndex = INDEX_NONE;
+
+		const FString CancellationMessage = TEXT("上一条 Codex 请求已取消。");
+		AddConversationMessage(EConversationMessageRole::System, CancellationMessage);
+		if (!ConversationTranscript.IsEmpty())
+		{
+			ConversationTranscript += TEXT("\n\n");
+		}
+		ConversationTranscript += FString::Printf(TEXT("[系统] %s\n"), *CancellationMessage);
+		TrimConversationHistory();
 	}
 
 	void AppendConversationText(const FString& Text)
@@ -2357,7 +3324,7 @@ private:
 		AppendAssistantText(Text);
 	}
 
-	void RefreshConversationText()
+	void RefreshConversationText(const bool bRebuildMessages = true)
 	{
 		bShowSettings = false;
 		bShowDetail = true;
@@ -2367,7 +3334,14 @@ private:
 		{
 			DetailTitleText->SetText(LOCTEXT("CodexConversationTitle", "Codex 会话"));
 		}
-		RebuildConversationMessages();
+		if (bRebuildMessages)
+		{
+			RebuildConversationMessages();
+		}
+		else if (ConversationScrollBox.IsValid())
+		{
+			ConversationScrollBox->ScrollToEnd();
+		}
 	}
 
 	void HandleAcpText(const FString& Text)
@@ -2432,9 +3406,9 @@ private:
 		}
 
 		const FString SelectedOptionId = bAllow ? PendingAllowOptionId : PendingDenyOptionId;
-		if (AcpClient.IsValid())
+		if (AgentBackend.IsValid())
 		{
-			AcpClient->RespondToPermission(PendingPermissionId, SelectedOptionId);
+			AgentBackend->RespondToPermission(PendingPermissionId, SelectedOptionId);
 		}
 
 		ClearPendingPermission();
@@ -2457,15 +3431,18 @@ private:
 	void ResetConversationView()
 	{
 		SaveActiveConversation();
-		if (AcpClient.IsValid())
+		if (AgentBackend.IsValid())
 		{
-			AcpClient->Stop();
+			AgentBackend->Stop();
 		}
 
 		FConversation NewConversation;
 		NewConversation.Title = LOCTEXT("NewConversationTitle", "新对话");
 		NewConversation.CreatedAt = FDateTime::Now();
+		NewConversation.TaskId = FString::Printf(TEXT("task_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+		NewConversation.ThreadId = FString::Printf(TEXT("thread_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
 		Conversations.Insert(NewConversation, 0);
+		TrimStoredConversations();
 		ActiveConversationIndex = 0;
 
 		bShowSettings = false;
@@ -2512,13 +3489,20 @@ private:
 		}
 
 		SaveActiveConversation();
+		// Conversation history is local to this panel. Do not attach a restored
+		// transcript to the ACP context from another conversation.
+		if (AgentBackend.IsValid())
+		{
+			AgentBackend->Stop();
+		}
 		ActiveConversationIndex = Index;
 
 		const FConversation& Conversation = Conversations[Index];
 		ConversationMessages = Conversation.Messages;
 		ConversationTranscript = Conversation.Transcript;
 		ActiveAssistantMessageIndex = Conversation.ActiveAssistantMessageIndex;
-		CurrentDetailText = Conversation.Transcript;
+		TrimConversationHistory();
+		CurrentDetailText = ConversationTranscript;
 
 		bShowSettings = false;
 		bShowDetail = ConversationMessages.Num() > 0;
@@ -2537,14 +3521,23 @@ private:
 		{
 			ComposerTextBox->SetText(FText::GetEmpty());
 		}
-		SetLastAction(FText::Format(LOCTEXT("SwitchedConversationAction", "已切换到对话：{0}"), GetConversationTitle(Index)));
+		SetLastAction(FText::Format(LOCTEXT("SwitchedConversationAction", "已切换到对话：{0}。继续发送将创建独立的 Codex 会话。"), GetConversationTitle(Index)));
 	}
 
 	FReply OnSelectConversation(int32 Index)
 	{
 		if (Index != ActiveConversationIndex)
 		{
+			const bool bCancellingActiveRequest = AgentBackend.IsValid() && AgentBackend->IsProcessing();
+			if (bCancellingActiveRequest)
+			{
+				FinalizeActiveRequestAsCancelled();
+			}
 			LoadConversation(Index);
+			if (bCancellingActiveRequest)
+			{
+				SetLastAction(LOCTEXT("ConversationSwitchedAndCancelledAction", "已切换对话，上一条 Codex 请求已取消。"));
+			}
 		}
 		return FReply::Handled();
 	}
@@ -2672,6 +3665,15 @@ private:
 
 	FReply OnNewConversationClicked()
 	{
+		if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
+		{
+			const FText Confirmation = LOCTEXT("NewConversationCancelsCurrentConfirmation", "Starting a new conversation cancels the active Codex request in this window only. Continue?");
+			if (FMessageDialog::Open(EAppMsgType::YesNo, Confirmation) != EAppReturnType::Yes)
+			{
+				return FReply::Handled();
+			}
+			FinalizeActiveRequestAsCancelled();
+		}
 		ResetConversationView();
 		return FReply::Handled();
 	}
@@ -2680,6 +3682,32 @@ private:
 	{
 		bShowSettings = true;
 		SetLastAction(LOCTEXT("SettingsOpenedAction", "已打开设置。"));
+		return FReply::Handled();
+	}
+
+	FReply OnShowChatClicked()
+	{
+		bShowSettings = false;
+		SetLastAction(LOCTEXT("HtmlParityChatOpened", "已返回聊天。"));
+		return FReply::Handled();
+	}
+
+	FReply OnRetryConversationClicked()
+	{
+		if (!ComposerTextBox.IsValid() || !HasRetryableError())
+		{
+			return FReply::Handled();
+		}
+
+		for (int32 Index = ConversationMessages.Num() - 1; Index >= 0; --Index)
+		{
+			if (ConversationMessages[Index].Role == EConversationMessageRole::User)
+			{
+				ComposerTextBox->SetText(FText::FromString(ConversationMessages[Index].Text));
+				SetLastAction(LOCTEXT("HtmlParityRetryPrepared", "已将上一条请求填入输入框，可再次发送。"));
+				break;
+			}
+		}
 		return FReply::Handled();
 	}
 
@@ -2692,7 +3720,7 @@ private:
 			return FReply::Handled();
 		}
 
-		if (AcpClient.IsValid() && AcpClient->IsProcessing())
+		if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
 		{
 			SetLastAction(LOCTEXT("CodexBusyAction", "Codex 正在处理上一条消息，请稍后再发送。"));
 			return FReply::Handled();
@@ -2705,15 +3733,28 @@ private:
 			ComposerTextBox->SetText(FText::GetEmpty());
 		}
 
-		if (!AcpClient.IsValid())
+		if (!AgentBackend.IsValid())
 		{
-			HandleAcpError(TEXT("Codex ACP 客户端未初始化。"));
+			HandleAcpError(TEXT("Configured Agent Backend is not initialized."));
 			return FReply::Handled();
 		}
 
-		SetLastAction(LOCTEXT("SendingToCodexAction", "正在发送到 Codex ACP..."));
-		AcpClient->SetPermissionMode(CurrentMode);
-		AcpClient->SendPrompt(Message);
+		SetLastAction(FText::FromString(FString::Printf(TEXT("Sending to %s..."), *AgentBackend->GetDisplayName())));
+		AgentBackend->SetPermissionMode(CurrentMode);
+		if (Conversations.IsValidIndex(ActiveConversationIndex))
+		{
+			FConversation& Conversation = Conversations[ActiveConversationIndex];
+			if (Conversation.TaskId.IsEmpty())
+			{
+				Conversation.TaskId = FString::Printf(TEXT("task_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+			}
+			if (Conversation.ThreadId.IsEmpty())
+			{
+				Conversation.ThreadId = FString::Printf(TEXT("thread_%s"), *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+			}
+			AgentBackend->SetConversationIdentity(Conversation.TaskId, Conversation.ThreadId);
+		}
+		AgentBackend->SendPrompt(Message);
 		return FReply::Handled();
 	}
 
@@ -2762,10 +3803,41 @@ private:
 			return FReply::Handled();
 		}
 
-		FWorldDataMCPServer::RefreshConnectionFiles();
-		SetLastAction(LOCTEXT("SetupCliDoneAction", "已写入 Claude Code、Cursor、Codex 三方 CLI 连接配置。"));
-		UEBridgeMCP::Notify(LOCTEXT("SetupCliDoneNotification", "CLI 连接配置已生成（Codex/Cursor/Claude Code）。"));
+		FWorldDataMCPServer::ProvisionClientConfigurations();
+		SetLastAction(LOCTEXT("SetupCliDoneAction", "已更新允许写入的本地 CLI 连接配置；项目级配置默认关闭以避免在工作区保存 Token。"));
+		UEBridgeMCP::Notify(LOCTEXT("SetupCliDoneNotification", "本地 CLI 连接配置已更新；项目级配置依安全策略决定是否生成。"));
 		SetDetail(LOCTEXT("SetupCliReportTitle", "CLI 配置结果"), FWorldDataMCPServer::GetCliSetupReportJson());
+		return FReply::Handled();
+	}
+
+	FReply OnShowAgentBackendDiagnosticsClicked()
+	{
+		SetDetail(LOCTEXT("AgentBackendDiagnosticsTitle", "Agent Backend Diagnostics"), FWorldDataAgentBackendFactory::GetDiagnosticsJson());
+		SetLastAction(LOCTEXT("AgentBackendDiagnosticsAction", "Displayed Agent Backend diagnostics."));
+		return FReply::Handled();
+	}
+
+	FReply OnRotateAccessTokenClicked()
+	{
+		const FText Confirmation = LOCTEXT("RotateMcpTokenConfirmation", "This revokes all active MCP sessions and replaces the token in configured local clients. Continue?");
+		if (FMessageDialog::Open(EAppMsgType::YesNo, Confirmation) != EAppReturnType::Yes)
+		{
+			return FReply::Handled();
+		}
+
+		FString Error;
+		if (!FWorldDataMCPServer::RotateAccessToken(Error))
+		{
+			SetLastAction(FText::FromString(Error));
+			return FReply::Handled();
+		}
+
+		// This button is an explicit user action, so it may update local client
+		// files with the newly rotated token.
+		FWorldDataMCPServer::ProvisionClientConfigurations();
+		SetLastAction(LOCTEXT("RotateMcpTokenDone", "MCP token rotated and local client configuration updated."));
+		UEBridgeMCP::Notify(LOCTEXT("RotateMcpTokenNotification", "MCP token rotated. Existing clients must reconnect."));
+		SetDetail(LOCTEXT("RotateMcpTokenReport", "MCP Token Rotation"), FWorldDataMCPServer::GetCliSetupReportJson());
 		return FReply::Handled();
 	}
 
@@ -2833,6 +3905,21 @@ private:
 		return FReply::Handled();
 	}
 
+	FReply OnCopyUnsafePythonTokenClicked()
+	{
+		const FString Token = FWorldDataMCPServer::GetUnsafePythonCapabilityToken();
+		if (Token.IsEmpty())
+		{
+			SetLastAction(LOCTEXT("UnsafePythonTokenUnavailable", "Unsafe Python is disabled or the server is not running."));
+			return FReply::Handled();
+		}
+
+		UEBridgeMCP::CopyToClipboard(Token);
+		SetLastAction(LOCTEXT("UnsafePythonTokenCopied", "A Python capability token was copied. It expires in ten minutes or when the editor MCP server stops."));
+		UEBridgeMCP::Notify(LOCTEXT("UnsafePythonTokenCopiedNotification", "Python capability token copied."));
+		return FReply::Handled();
+	}
+
 	FReply OnCopyCurrentClicked()
 	{
 		if (!CurrentDetailText.IsEmpty())
@@ -2867,11 +3954,15 @@ private:
 	FString CursorCliPath;
 	FString DetectedCodexCliPath;
 	FString DetectedCursorCliPath;
+	FSlateRoundedBoxBrush HtmlShellBrush{ FLinearColor::White, 20.0f };
+	FSlateRoundedBoxBrush HtmlLargeCardBrush{ FLinearColor::White, 16.0f };
+	FSlateRoundedBoxBrush HtmlCardBrush{ FLinearColor::White, 12.0f };
+	FSlateRoundedBoxBrush HtmlControlBrush{ FLinearColor::White, 8.0f };
 	FEditableTextBoxStyle LightTextBoxStyle;
 	FButtonStyle ComposerButtonStyle;
 	FComboButtonStyle ComposerComboButtonStyle;
 	EWorldDataCodexPermissionMode CurrentMode = EWorldDataCodexPermissionMode::Default;
-	TSharedPtr<FWorldDataCodexACPClient> AcpClient;
+	TSharedPtr<IWorldDataAgentBackend> AgentBackend;
 	bool bShowDetail = false;
 	bool bShowSettings = false;
 	bool bDetailIsConversation = false;

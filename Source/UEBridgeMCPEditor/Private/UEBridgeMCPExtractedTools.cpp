@@ -621,7 +621,7 @@ FString GetToolDefinitionsJson()
 {"name":"list_resources","description":"List UEBridgeMCP standalone resources using ubridge:// URIs.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"List Resources","readOnlyHint":true,"openWorldHint":false}},
 {"name":"read_resource","description":"Read a UEBridgeMCP standalone resource by URI. Recommended first read: ubridge://context/bootstrap.","inputSchema":{"type":"object","properties":{"uri":{"type":"string"}},"required":["uri"]},"annotations":{"title":"Read Resource","readOnlyHint":true,"openWorldHint":false}},
 {"name":"read_log","description":"Read recent Unreal log lines from the project Saved/Logs folder. Supports lines, severity, and category filters.","inputSchema":{"type":"object","properties":{"lines":{"type":"number","description":"Number of lines. Default 50."},"severity":{"type":"string","description":"Filter: Error, Warning, Log."},"category":{"type":"string"}}},"annotations":{"title":"Read Log","readOnlyHint":true,"openWorldHint":false}},
-{"name":"execute_python","description":"Execute Python code in the Unreal Editor through PythonScriptPlugin. Requires unsafe_confirm exactly equal to 'I understand this runs arbitrary Unreal Python'. Prefer structured UE tools first.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."},"unsafe_confirm":{"type":"string","description":"Must equal: I understand this runs arbitrary Unreal Python"}},"required":["code","unsafe_confirm"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":true,"openWorldHint":true}},
+	{"name":"execute_python","description":"Execute Python only when the project explicitly enables it and the caller supplies the current editor-session unsafe_token copied by the user from the UEBridgeMCP panel. Prefer structured UE tools first.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."},"unsafe_confirm":{"type":"string","description":"Must equal: I understand this runs arbitrary Unreal Python"},"unsafe_token":{"type":"string","description":"Short-lived capability token copied explicitly from the UEBridgeMCP panel."}},"required":["code","unsafe_confirm","unsafe_token"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":true,"openWorldHint":true}},
 {"name":"search_assets","description":"Search project assets by name, path, and optional class filter.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"classFilter":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Search Assets","readOnlyHint":true,"openWorldHint":false}},
 {"name":"find_static_meshes","description":"Search StaticMesh assets for placement or PCG use.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Find Static Meshes","readOnlyHint":true,"openWorldHint":false}},
 {"name":"get_level_actors","description":"UEBridgeMCP alias for listing current editor level actors.","inputSchema":{"type":"object","properties":{"classFilter":{"type":"string"},"nameContains":{"type":"string"},"selectedOnly":{"type":"boolean"},"maxResults":{"type":"number"}}},"annotations":{"title":"Get Level Actors","readOnlyHint":true,"openWorldHint":false}},
@@ -797,6 +797,11 @@ FString ReadLog(const TSharedPtr<FJsonObject>& Args)
 
 FString ExecutePython(const TSharedPtr<FJsonObject>& Args)
 {
+	if (!FWorldDataMCPServer::IsUnsafePythonEnabled())
+	{
+		return ErrorJson(TEXT("execute_python is disabled. Set [UEBridgeMCP.Security] bEnableUnsafePython=true in the project configuration, restart the editor, then explicitly copy the short-lived capability token from the UEBridgeMCP panel."));
+	}
+
 	const FString Code = GetStringField(Args, TEXT("code"));
 	if (Code.IsEmpty())
 	{
@@ -811,6 +816,12 @@ FString ExecutePython(const TSharedPtr<FJsonObject>& Args)
 	if (UnsafeConfirm != TEXT("I understand this runs arbitrary Unreal Python"))
 	{
 		return ErrorJson(TEXT("execute_python requires unsafe_confirm exactly equal to 'I understand this runs arbitrary Unreal Python'. Prefer structured UEBridgeMCP tools when possible."));
+	}
+
+	const FString UnsafeToken = GetStringField(Args, TEXT("unsafe_token"));
+	if (!FWorldDataMCPServer::ValidateUnsafePythonCapability(UnsafeToken))
+	{
+		return ErrorJson(TEXT("execute_python requires the current short-lived unsafe_token copied explicitly from the UEBridgeMCP panel."));
 	}
 
 	IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();

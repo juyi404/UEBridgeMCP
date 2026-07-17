@@ -4,25 +4,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/InteractiveProcess.h"
-
-struct FWorldDataAcpPermissionOption
-{
-	FString OptionId;
-	FString Name;
-	FString Kind;
-};
-
-struct FWorldDataAcpPermissionRequest
-{
-	int32 RequestId = 0;
-	FString Title;
-	FString ToolName;
-	FString ToolCallId;
-	FString SessionId;
-	FString AllowOptionId;
-	FString DenyOptionId;
-	TArray<FWorldDataAcpPermissionOption> Options;
-};
+#include "WorldDataAgentBackend.h"
 
 struct FWorldDataCodexAcpLaunchSpec
 {
@@ -31,38 +13,32 @@ struct FWorldDataCodexAcpLaunchSpec
 	FString DisplayPath;
 };
 
-DECLARE_DELEGATE_OneParam(FWorldDataAcpTextDelegate, const FString&);
-DECLARE_DELEGATE_OneParam(FWorldDataAcpStatusDelegate, const FString&);
-DECLARE_DELEGATE_OneParam(FWorldDataAcpErrorDelegate, const FString&);
-DECLARE_DELEGATE_OneParam(FWorldDataAcpPermissionDelegate, const FWorldDataAcpPermissionRequest&);
-
-enum class EWorldDataCodexPermissionMode : uint8
-{
-	Default,
-	Plan,
-	Bypass
-};
-
-class FWorldDataCodexACPClient : public TSharedFromThis<FWorldDataCodexACPClient>
+class FWorldDataCodexACPClient : public IWorldDataAgentBackend, public TSharedFromThis<FWorldDataCodexACPClient>
 {
 public:
 	~FWorldDataCodexACPClient();
 
-	void SendPrompt(const FString& Prompt);
-	void Stop();
-	void SetPermissionMode(EWorldDataCodexPermissionMode InMode);
-	EWorldDataCodexPermissionMode GetPermissionMode() const;
-	void RespondToPermission(int32 RequestId, const FString& OptionId);
+	virtual FString GetBackendId() const override { return TEXT("acp"); }
+	virtual FString GetDisplayName() const override { return TEXT("ACP Adapter (compatibility)"); }
+	virtual FWorldDataAgentBackendCapabilities GetCapabilities() const override
+	{
+		FWorldDataAgentBackendCapabilities Capabilities;
+		Capabilities.bSupportsPermissionRequests = true;
+		return Capabilities;
+	}
+	virtual void ConfigureMcpConnection(const FWorldDataAgentMcpConnection& Connection) override { McpConnection = Connection; }
+	virtual void SendPrompt(const FString& Prompt) override;
+	virtual void Stop() override;
+	virtual void SetPermissionMode(EWorldDataCodexPermissionMode InMode) override;
+	virtual void SetConversationIdentity(const FString& TaskId, const FString& ThreadId) override { SetContextIdentity(TaskId, ThreadId); }
+	void SetContextIdentity(const FString& InTaskId, const FString& InThreadId);
+	virtual EWorldDataCodexPermissionMode GetPermissionMode() const override;
+	virtual void RespondToPermission(int32 RequestId, const FString& OptionId) override;
 
-	bool IsRunning() const;
-	bool IsReady() const;
-	bool IsProcessing() const;
-	FString GetLastError() const;
-
-	FWorldDataAcpTextDelegate OnText;
-	FWorldDataAcpStatusDelegate OnStatus;
-	FWorldDataAcpErrorDelegate OnError;
-	FWorldDataAcpPermissionDelegate OnPermission;
+	virtual bool IsRunning() const override;
+	virtual bool IsReady() const override;
+	virtual bool IsProcessing() const override;
+	virtual FString GetLastError() const override;
 
 private:
 	bool EnsureProcess();
@@ -82,7 +58,6 @@ private:
 	void HandleSessionUpdate(const FString& AcpSessionId, const TSharedPtr<FJsonObject>& Update);
 
 	bool FindAdapterLaunch(FWorldDataCodexAcpLaunchSpec& OutLaunchSpec) const;
-	FString ResolveOnPath(const FString& Command) const;
 	FString JsonToString(const TSharedPtr<FJsonObject>& Object) const;
 	void Fail(const FString& Message);
 	void EmitStatus(const FString& Message);
@@ -94,6 +69,9 @@ private:
 	FString PendingPrompt;
 	FString LastError;
 	FString ActiveAdapterDisplayPath;
+	FString ContextTaskId;
+	FString ContextThreadId;
+	FWorldDataAgentMcpConnection McpConnection;
 	EWorldDataCodexPermissionMode PermissionMode = EWorldDataCodexPermissionMode::Default;
 
 	int32 NextRpcId = 1;
@@ -101,6 +79,7 @@ private:
 	int32 SessionRpcId = 0;
 	int32 PromptRpcId = 0;
 	int32 NextPermissionRequestId = 1;
+	uint64 ProcessGeneration = 0;
 	TMap<int32, TSharedPtr<FJsonValue>> PendingPermissionIds;
 
 	bool bInitialized = false;
