@@ -25,6 +25,7 @@ public class UEBridgeMCPEditor : ModuleRules
 			"ToolMenus",
 			"UEBridgeMCPCore",
 			"UEBridgeMCPTools",
+			"WebBrowser",
 			"WorkspaceMenuStructure",
 			"UnrealEd"
 		});

@@ -1,5 +1,6 @@
 #include "SUEBridgeMCPPanel.h"
 #include "SUEBridgeMCPApprovalView.h"
+#include "SUEBridgeMCPWebPanel.h"
 
 #include "WorldDataAgentBackend.h"
 #include "UEBridgeMCPAgentController.h"
@@ -2115,7 +2116,7 @@ private:
 			[
 				BuildCodexAcpSetupPanel()
 			]
-			];
+			;
 	}
 
 	TSharedRef<SWidget> BuildCodexAcpSetupPanel()
@@ -4059,7 +4060,7 @@ private:
 
 TSharedRef<SWidget> CreateUEBridgeMCPPanel()
 {
-	return SNew(SUEBridgeMCPPanel);
+	return SNew(SUEBridgeMCPWebPanel);
 }
 
 #undef LOCTEXT_NAMESPACE
