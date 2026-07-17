@@ -71,33 +71,66 @@ body {
 @media (max-width: 820px) {
   html,
   body {
-    height: auto;
-    min-height: 100%;
-    overflow: auto;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   body {
-    padding: 0;
+    padding: 8px;
   }
 
   .app {
-    height: auto;
-    min-height: 100vh;
+    display: grid;
+    grid-template-columns: minmax(180px, 32%) minmax(0, 1fr);
+    height: 100%;
+    min-height: 0;
   }
 
   .content__body {
-    display: block;
-    overflow: visible;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+    padding: 14px;
   }
 
   #chat-view {
-    height: auto;
-    min-height: 460px;
+    height: 100%;
+    min-height: 0;
   }
 
-  #chat-view .messages,
-  .settings-view {
+  #chat-view .messages {
     height: auto;
-    overflow: visible;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .settings-view {
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .sidebar__body {
+    min-height: 0;
+  }
+
+  .sidebar__actions {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-action {
+    justify-content: flex-start;
+  }
+
+  .sidebar__history {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .conversation-list {
+    display: grid;
+    overflow-x: hidden;
+    overflow-y: visible;
   }
 }

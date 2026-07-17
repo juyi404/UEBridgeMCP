@@ -16,6 +16,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.message--tool {
+  width: fit-content;
+  max-width: min(680px, 92%);
 }
 
 .tool-state {
@@ -30,6 +37,27 @@
 .message--tool.completed .tool-state {
   background: var(--success);
   box-shadow: 0 0 0 3px rgba(56, 132, 92, .1);
+}
+
+.message--tool.failed .tool-state {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(217, 90, 80, .1);
+}
+
+.tool-status {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tool-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #46668e;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .conversation-empty {
@@ -241,6 +269,88 @@
   background: var(--surface-soft);
 }
 
+.tool-registry {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 8px;
+}
+
+.tool-row {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e6ecf5;
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.tool-row__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tool-row__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tool-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.tool-row__meta span:not(:last-child)::after {
+  margin-left: 8px;
+  color: #c2ccda;
+  content: "·";
+}
+
+.tool-row__capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.tool-row__capabilities .chip {
+  padding: 2px 5px;
+  font-size: 9px;
+}
+
+.tool-risk {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: #edf2fa;
+  color: #657996;
+  font-size: 9px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.tool-risk--read_only { background: var(--success-soft); color: var(--success); }
+.tool-risk--workspace_change { background: var(--accent-soft); color: var(--accent-dark); }
+.tool-risk--destructive { background: var(--danger-soft); color: var(--danger); }
+.tool-risk--arbitrary_code { background: #fff4df; color: #9a6817; }
+
+.tool-registry-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 @media (max-width: 760px) {
   .runtime-config-row {
     align-items: stretch;
@@ -254,5 +364,9 @@
 
   .model-select select {
     max-width: 130px;
+  }
+
+  .tool-registry {
+    grid-template-columns: 1fr;
   }
 }

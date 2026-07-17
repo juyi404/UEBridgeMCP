@@ -30,7 +30,7 @@ public:
 	void ResumeThread(const FString& ThreadId, const FString& Model);
 
 	UFUNCTION()
-	void SendMessage(const FString& ThreadId, const FString& Text, const FString& Model);
+	bool SendMessage(const FString& ThreadId, const FString& Text, const FString& Model);
 
 	UFUNCTION()
 	void ResolveApproval(const FString& RequestId, bool bApproved);
@@ -56,8 +56,8 @@ private:
 	void HandleAgentEvent(const FWorldDataAgentEvent& Event);
 	FString AddDraftConversation();
 	void BindDraftConversation(const FString& DraftId, const FString& ThreadId);
-	void StartThread(const FString& DraftId);
-	void SendTurn(const FString& ThreadId, const FString& Text);
+	bool StartThread(const FString& DraftId);
+	bool SendTurn(const FString& ThreadId, const FString& Text);
 	FConversationSession& GetOrAddSession(const FString& ThreadId);
 	FConversationSession* FindSession(const FString& ThreadId);
 	const FConversationSession* FindSession(const FString& ThreadId) const;

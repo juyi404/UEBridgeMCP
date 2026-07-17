@@ -1,5 +1,6 @@
 #include "IWorldDataAgentUIModule.h"
 
+#include "GenericPlatform/GenericPlatformHttp.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
@@ -15,6 +16,51 @@ DEFINE_LOG_CATEGORY_STATIC(LogWorldDataAgentUI, Log, All);
 
 namespace
 {
+	bool ValidateWebResources(const FString& WebRoot, FString& OutError)
+	{
+		static constexpr const TCHAR* RequiredResources[] =
+		{
+			TEXT("index.html"),
+			TEXT("console.css"),
+			TEXT("layout.css"),
+			TEXT("message.css"),
+			TEXT("app.js")
+		};
+
+		TArray<FString> MissingResources;
+		for (const TCHAR* ResourceName : RequiredResources)
+		{
+			if (!FPaths::FileExists(FPaths::Combine(WebRoot, ResourceName)))
+			{
+				MissingResources.Add(ResourceName);
+			}
+		}
+
+		if (MissingResources.IsEmpty()) return true;
+		OutError = FString::Printf(TEXT("Missing Web resources: %s"), *FString::Join(MissingResources, TEXT(", ")));
+		return false;
+	}
+
+	FString MakeFileUrl(const FString& AbsolutePath)
+	{
+		FString StandardPath = AbsolutePath;
+		FPaths::MakeStandardFilename(StandardPath);
+
+		TArray<FString> PathSegments;
+		StandardPath.ParseIntoArray(PathSegments, TEXT("/"), false);
+		for (int32 SegmentIndex = 0; SegmentIndex < PathSegments.Num(); ++SegmentIndex)
+		{
+			const FString& Segment = PathSegments[SegmentIndex];
+			const bool bIsDriveLetter = SegmentIndex == 0 && Segment.Len() == 2 && Segment[1] == TCHAR(':');
+			if (!bIsDriveLetter)
+			{
+				PathSegments[SegmentIndex] = FGenericPlatformHttp::UrlEncode(Segment);
+			}
+		}
+
+		return FString::Printf(TEXT("file:///%s"), *FString::Join(PathSegments, TEXT("/")));
+	}
+
 	class SWorldDataAgentWebPanel final : public SCompoundWidget
 	{
 	public:
@@ -32,21 +78,21 @@ namespace
 			}
 
 			const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UEBridgeMCP"));
-			const FString HtmlPath = Plugin.IsValid()
-				? FPaths::ConvertRelativePathToFull(FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("Web"), TEXT("index.html")))
+			const FString WebRoot = Plugin.IsValid()
+				? FPaths::ConvertRelativePathToFull(FPaths::Combine(Plugin->GetBaseDir(), TEXT("Resources"), TEXT("Web")))
 				: FString();
-			if (HtmlPath.IsEmpty() || !FPaths::FileExists(HtmlPath))
+			FString ResourceError;
+			if (WebRoot.IsEmpty() || !ValidateWebResources(WebRoot, ResourceError))
 			{
-				UE_LOG(LogWorldDataAgentUI, Error, TEXT("WorldData Agent HTML entry point is missing: %s"), *HtmlPath);
-				ShowStartupError(TEXT("WorldData Agent HTML resources are missing."));
+				UE_LOG(LogWorldDataAgentUI, Error, TEXT("WorldData Agent HTML resources are incomplete: %s"), *ResourceError);
+				ShowStartupError(FString::Printf(TEXT("WorldData Agent HTML resources are incomplete. %s"), *ResourceError));
 				return;
 			}
+			const FString HtmlPath = FPaths::Combine(WebRoot, TEXT("index.html"));
 
 			Bridge.Reset(NewObject<UWorldDataAgentWebBridge>(GetTransientPackage()));
 			Bridge->Initialize();
-			FString BrowserPath = HtmlPath;
-			BrowserPath.ReplaceInline(TEXT("\\"), TEXT("/"));
-			const FString InitialUrl = FString::Printf(TEXT("file:///%s"), *BrowserPath);
+			const FString InitialUrl = MakeFileUrl(HtmlPath);
 			UE_LOG(LogWorldDataAgentUI, Log, TEXT("Opening WorldData Agent HTML panel: %s"), *InitialUrl);
 			Browser = SNew(SWebBrowser)
 				.InitialURL(InitialUrl)

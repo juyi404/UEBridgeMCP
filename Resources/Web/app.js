@@ -19,6 +19,9 @@
   let state = null;
   let polling = false;
   let previousConversationSignature = "";
+  let previousSettingsSignature = "";
+  let actionError = "";
+  let pendingAction = "";
 
   const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[char]);
   function renderInlineMarkdown(value) {
@@ -82,8 +85,13 @@
   }
 
   function threadStatusLabel(status) {
-    const labels = Object.freeze({ creating: "创建中", loading: "加载中", running: "生成中", approval: "待确认", systemError: "异常" });
+    const labels = Object.freeze({ draft: "草稿", creating: "创建中", loading: "加载中", running: "生成中", approval: "待确认", active: "活跃", loaded: "已加载", idle: "空闲", completed: "已完成", failed: "失败", systemError: "异常" });
     return labels[status] || "";
+  }
+
+  function toolStatusLabel(status) {
+    const labels = Object.freeze({ running: "执行中", completed: "已完成", failed: "失败", pending: "等待中" });
+    return labels[status] || status || "等待中";
   }
   const bridge = () => window.ue && window.ue.worlddata;
   async function invoke(method, ...args) {
@@ -108,6 +116,16 @@
     if (connection.state === "ready") return "Codex 与 WorldData MCP 已就绪";
     if (connection.state === "degraded" || connection.state === "fatal") return connection.statusText || "连接异常";
     return connection.statusText || "正在初始化 Agent Host…";
+  }
+
+  function toolRiskLabel(risk) {
+    const labels = Object.freeze({
+      read_only: "只读",
+      workspace_change: "修改工作区",
+      destructive: "破坏性操作",
+      arbitrary_code: "任意代码"
+    });
+    return labels[risk] || "未知风险";
   }
 
   function relativeTime(timestamp) {
@@ -158,17 +176,33 @@
     elements.modelSelect.innerHTML = models.map(model => `<option value="${escapeHtml(model.id)}" ${model.id === current || (!current && model.isDefault) ? "selected" : ""}>${escapeHtml(model.displayName || model.id)}</option>`).join("");
   }
 
+  function conversationSignature(next) {
+    return JSON.stringify([
+      next.activeThreadId,
+      ...(next.conversation || []).map(item => [
+        item.id, item.turnId, item.kind, item.role, item.toolName, item.status, item.text
+      ])
+    ]);
+  }
+
+  function renderToolMessage(item) {
+    const status = item.status || "pending";
+    const detail = item.text && item.text !== status ? `<code class="tool-detail">${escapeHtml(item.text)}</code>` : "";
+    return `<article class="message message--tool ${escapeHtml(status)}"><span class="message__role">TOOL · ${escapeHtml(item.toolName || "工具调用")}</span><div class="message__body"><span class="tool-state" aria-hidden="true"></span><span class="tool-status">${escapeHtml(toolStatusLabel(status))}</span>${detail}</div></article>`;
+  }
+
   function renderConversation(next) {
-    const signature = JSON.stringify([next.activeThreadId, ...(next.conversation || []).map(item => [item.id, item.status, item.text && item.text.length])]);
+    const signature = conversationSignature(next);
     if (signature === previousConversationSignature) return;
     const wasNearBottom = elements.messageList.scrollHeight - elements.messageList.scrollTop - elements.messageList.clientHeight < 100;
+    const previousScrollTop = elements.messageList.scrollTop;
     previousConversationSignature = signature;
     if (!next.conversation.length) {
       elements.messageList.innerHTML = `<div class="empty-state"><strong>今天我能帮您做什么？</strong><span>连接完成后，可直接操作当前 Unreal 项目。</span></div>`;
       return;
     }
     elements.messageList.innerHTML = next.conversation.map(item => {
-      if (item.kind === "tool") return `<article class="message message--tool ${escapeHtml(item.status)}"><span class="message__role">TOOL · ${escapeHtml(item.toolName || "工具调用")}</span><div class="message__body"><span class="tool-state"></span>${escapeHtml(item.status || item.text || "")}</div></article>`;
+      if (item.kind === "tool") return renderToolMessage(item);
       const role = item.role === "user" ? "user" : "assistant";
       const body = role === "user"
         ? `<div class="message-body">${escapeHtml(item.text)}</div>`
@@ -176,12 +210,39 @@
       return `<article class="message message--${role}"><span class="message__role">${role === "user" ? "你" : "CODEX"}</span>${body}</article>`;
     }).join("");
     if (wasNearBottom) elements.messageList.scrollTop = elements.messageList.scrollHeight;
+    else elements.messageList.scrollTop = previousScrollTop;
   }
 
   function renderSettings(next) {
     const runtime = next.runtime;
     const connection = next.connection;
     const configured = runtime.configured && runtime.verified;
+    const tools = Array.isArray(next.tools) ? next.tools : [];
+    const settingsSignature = JSON.stringify({
+      configuring: next.configuring,
+      runtime,
+      connection: {
+        state: connection.state,
+        statusText: connection.statusText,
+        mcpConnected: connection.mcpConnected,
+        authenticated: connection.authenticated,
+        models: connection.models
+      },
+      tools
+    });
+    if (settingsSignature === previousSettingsSignature) return;
+    previousSettingsSignature = settingsSignature;
+    const toolRegistry = tools.length
+      ? `<div class="tool-registry" role="list">${tools.map(tool => {
+          const capabilities = Array.isArray(tool.requiredCapabilities) ? tool.requiredCapabilities.filter(Boolean) : [];
+          const risk = tool.risk || "unknown";
+          return `<article class="tool-row" role="listitem">
+            <div class="tool-row__top"><code class="tool-row__name">${escapeHtml(tool.name || "unnamed_tool")}</code><span class="tool-risk tool-risk--${escapeHtml(risk)}">${escapeHtml(toolRiskLabel(risk))}</span></div>
+            <div class="tool-row__meta"><span>${escapeHtml(tool.provider || "unknown provider")}</span><span>${tool.requiresApproval ? "需要审批" : "无需审批"}</span>${tool.audited ? "<span>已审计</span>" : ""}</div>
+            ${capabilities.length ? `<div class="tool-row__capabilities">${capabilities.map(capability => `<span class="chip">${escapeHtml(capability)}</span>`).join("")}</div>` : ""}
+          </article>`;
+        }).join("")}</div>`
+      : `<p class="tool-registry-empty">尚未检测到已注册的 MCP 工具。请确认 UEBridgeMCPTools 已完成加载。</p>`;
     elements.settingsContent.innerHTML = `
       <article class="settings-card settings-card--wide">
         <div class="settings-card__head"><div><h3 class="settings-card__title">Codex 后端运行时</h3><p class="settings-card__description">自动发现原生 Codex、复制到托管目录、生成协议 schema，并按 SHA-256 固定到当前项目。</p></div><span class="server-state ${configured ? "" : "is-stopped"}">${configured ? "已配置" : "未配置"}</span></div>
@@ -191,7 +252,11 @@
       <article class="settings-card">
         <div class="settings-card__head"><div><h3 class="settings-card__title">WorldData MCP</h3><p class="settings-card__description">每个 Codex 线程自动注入本地服务和临时认证头。</p></div><span class="server-state ${connection.mcpConnected ? "" : "is-stopped"}">${connection.mcpConnected ? "线程已连接" : "等待会话"}</span></div>
         <div class="client-banner"><span class="client-banner__mark">MCP</span><span>${escapeHtml(connectionLabel(connection))}</span></div>
-        <div class="settings-actions"><button id="refresh-settings" class="button button--quiet" type="button">刷新状态</button></div>
+        <div class="settings-actions"><button id="refresh-settings" class="button button--quiet" type="button">刷新会话</button></div>
+      </article>
+      <article class="settings-card settings-card--wide">
+        <div class="settings-card__head"><div><h3 class="settings-card__title">已注册 MCP 工具</h3><p class="settings-card__description">此列表直接来自 Unreal 当前运行中的工具注册表；名称、提供方、风险级别和审批要求会随模块加载状态更新。</p></div><span class="server-state ${tools.length ? "" : "is-stopped"}">${tools.length} 个工具</span></div>
+        ${toolRegistry}
       </article>
       <article class="settings-card">
         <div class="settings-card__head"><div><h3 class="settings-card__title">账户与模型</h3><p class="settings-card__description">状态直接来自 Codex app-server，不保存登录凭据，也不硬编码模型。</p></div><span class="server-state ${connection.authenticated ? "" : "is-stopped"}">${connection.authenticated ? "已认证" : "需要登录"}</span></div>
@@ -202,8 +267,8 @@
         <div class="settings-card__head"><div><h3 class="settings-card__title">安全连接</h3><p class="settings-card__description">浏览器只接收稳定状态 JSON；MCP 密钥仅存在于编辑器内存和受信任子进程环境。</p></div><span class="server-state">本地保护</span></div>
         <div class="security-grid"><div class="security-option"><div class="security-option__copy"><span class="security-option__title">Agent Host IPC v1</span><span class="security-option__help">有界 JSONL 帧、协议版本校验和明确错误代码。</span></div><span class="chip">STDIO</span></div><div class="security-option"><div class="security-option__copy"><span class="security-option__title">线程级 MCP</span><span class="security-option__help">临时认证头不会进入 HTML、配置文件或诊断日志。</span></div><span class="chip">EPHEMERAL</span></div></div>
       </article>`;
-    document.querySelector("#configure-runtime")?.addEventListener("click", () => invoke("configureruntime").catch(console.error));
-    document.querySelector("#refresh-settings")?.addEventListener("click", () => invoke("refreshthreads").catch(console.error));
+    document.querySelector("#configure-runtime")?.addEventListener("click", () => { void runAction("配置运行时", "configure", () => invoke("configureruntime")); });
+    document.querySelector("#refresh-settings")?.addEventListener("click", () => { void refreshThreads(); });
   }
 
   function renderApproval(next) {
@@ -214,6 +279,44 @@
     elements.approvalText.textContent = approval.text || "此操作需要编辑器确认。";
   }
 
+  function renderError(next) {
+    const backendError = next?.error?.present
+      ? `${next.error.code ? `[${next.error.code}] ` : ""}${next.error.message}`
+      : "";
+    const message = backendError || actionError;
+    elements.chatError.classList.toggle("hidden", !message);
+    elements.chatError.textContent = message;
+  }
+
+  function describeActionError(action, error) {
+    const detail = error instanceof Error && error.message ? error.message : "请检查 Unreal 连接后重试。";
+    return `${action}失败：${detail}`;
+  }
+
+  async function runAction(action, key, operation) {
+    if (pendingAction) return false;
+    pendingAction = key;
+    actionError = "";
+    renderError(state);
+    try {
+      await operation();
+      await poll();
+      return true;
+    } catch (error) {
+      actionError = describeActionError(action, error);
+      renderError(state);
+      console.error(error);
+      return false;
+    } finally {
+      pendingAction = "";
+      if (state) render(state);
+    }
+  }
+
+  async function refreshThreads() {
+    await runAction("刷新会话", "refresh", () => invoke("refreshthreads"));
+  }
+
   function render(next) {
     renderConnection(next);
     renderThreads(next);
@@ -221,11 +324,10 @@
     renderConversation(next);
     if (route === "settings") renderSettings(next);
     const ready = next.connection.state === "ready";
-    elements.messageInput.disabled = !ready || next.busy;
-    elements.send.disabled = !ready || next.busy;
+    elements.messageInput.disabled = !ready || next.busy || pendingAction === "send";
+    elements.send.disabled = !ready || next.busy || pendingAction === "send";
     elements.send.textContent = next.busy ? "处理中…" : "发送";
-    elements.chatError.classList.toggle("hidden", !next.error?.present);
-    elements.chatError.textContent = next.error?.present ? `${next.error.code ? `[${next.error.code}] ` : ""}${next.error.message}` : "";
+    renderError(next);
     renderApproval(next);
   }
 
@@ -246,27 +348,38 @@
   document.querySelectorAll("[data-route]").forEach(button => button.addEventListener("click", () => setRoute(button.dataset.route)));
   document.querySelector("#top-settings").addEventListener("click", () => setRoute("settings"));
   document.querySelector("#back-chat").addEventListener("click", () => setRoute("chat"));
-  document.querySelector("#refresh").addEventListener("click", () => invoke("refreshthreads").catch(console.error));
-  document.querySelector("#new-chat").addEventListener("click", async () => { await invoke("newconversation"); setRoute("chat"); await poll(); elements.messageInput.focus(); });
+  document.querySelector("#refresh").addEventListener("click", () => { void refreshThreads(); });
+  document.querySelector("#new-chat").addEventListener("click", async () => {
+    const created = await runAction("新建会话", "new-chat", () => invoke("newconversation"));
+    if (!created) return;
+    setRoute("chat");
+    elements.messageInput.focus();
+  });
   elements.threadList.addEventListener("click", async event => {
     const button = event.target.closest("[data-thread-id]");
     if (!button) return;
-    setRoute("chat");
-    await invoke("resumethread", button.dataset.threadId, elements.modelSelect.value || "");
-    await poll();
+    const resumed = await runAction("加载会话", "resume", () => invoke("resumethread", button.dataset.threadId, elements.modelSelect.value || ""));
+    if (resumed) setRoute("chat");
   });
   elements.composer.addEventListener("submit", async event => {
     event.preventDefault();
-    const text = elements.messageInput.value.trim();
-    if (!text || !state || state.busy) return;
-    elements.messageInput.value = "";
-    await invoke("sendmessage", state.activeThreadId || "", text, elements.modelSelect.value || "");
+    const draft = elements.messageInput.value;
+    const text = draft.trim();
+    if (!text || !state || state.busy || pendingAction) return;
+    const sent = await runAction("发送消息", "send", async () => {
+      const accepted = await invoke("sendmessage", state.activeThreadId || "", text, elements.modelSelect.value || "");
+      if (accepted === false) {
+        await poll();
+        throw new Error("请求未被 Agent Host 接受。");
+      }
+    });
+    if (sent) elements.messageInput.value = "";
   });
   elements.messageInput.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); elements.composer.requestSubmit(); }
   });
-  document.querySelector("#deny").addEventListener("click", () => state?.approval?.requestId && invoke("resolveapproval", state.approval.requestId, false));
-  document.querySelector("#approve").addEventListener("click", () => state?.approval?.requestId && invoke("resolveapproval", state.approval.requestId, true));
+  document.querySelector("#deny").addEventListener("click", () => state?.approval?.requestId && void runAction("拒绝操作", "approval", () => invoke("resolveapproval", state.approval.requestId, false)));
+  document.querySelector("#approve").addEventListener("click", () => state?.approval?.requestId && void runAction("允许操作", "approval", () => invoke("resolveapproval", state.approval.requestId, true)));
 
   setInterval(poll, 600);
   poll();

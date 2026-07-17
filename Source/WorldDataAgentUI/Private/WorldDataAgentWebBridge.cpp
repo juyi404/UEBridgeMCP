@@ -271,25 +271,29 @@ void UWorldDataAgentWebBridge::ResumeThread(const FString& ThreadId, const FStri
 	}
 }
 
-void UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FString& Text, const FString& Model)
+bool UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FString& Text, const FString& Model)
 {
 	FString Message = Text;
 	Message.TrimStartAndEndInline();
-	if (Message.IsEmpty()) return;
+	if (Message.IsEmpty()) return false;
 	SelectedModel = Model;
 	UiErrorCode.Empty();
 	UiErrorMessage.Empty();
 	if (!ThreadId.IsEmpty() && ThreadId != ActiveThreadId)
 	{
 		SetUiError(TEXT("thread.not_resumed"), TEXT("Resume the selected conversation before sending a message."));
-		return;
+		return false;
 	}
 	if (ActiveThreadId.IsEmpty())
 	{
 		ActiveThreadId = AddDraftConversation();
 	}
 	FConversationSession& Session = GetOrAddSession(ActiveThreadId);
-	if (Session.IsBusy()) return;
+	if (Session.IsBusy())
+	{
+		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current conversation operation to finish before sending another message."));
+		return false;
+	}
 	Session.ErrorCode.Empty();
 	Session.ErrorMessage.Empty();
 
@@ -298,14 +302,24 @@ void UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FStrin
 	UserItem.Kind = TEXT("message");
 	UserItem.Role = TEXT("user");
 	UserItem.Text = Message;
-	Session.Items.Add(MoveTemp(UserItem));
+	const int32 UserItemIndex = Session.Items.Add(MoveTemp(UserItem));
 	if (Session.bDraft)
 	{
 		Session.PendingFirstMessage = Message;
-		if (!Session.bCreating) StartThread(ActiveThreadId);
-		return;
+		if (!Session.bCreating && !StartThread(ActiveThreadId))
+		{
+			Session.PendingFirstMessage.Empty();
+			Session.Items.RemoveAt(UserItemIndex);
+			return false;
+		}
+		return true;
 	}
-	SendTurn(ActiveThreadId, Message);
+	if (!SendTurn(ActiveThreadId, Message))
+	{
+		Session.Items.RemoveAt(UserItemIndex);
+		return false;
+	}
+	return true;
 }
 
 void UWorldDataAgentWebBridge::ResolveApproval(const FString& RequestId, const bool bApproved)
@@ -438,8 +452,9 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 			Session->Items.Add(MoveTemp(Item));
 			Existing = &Session->Items.Last();
 		}
+		if (!Event.ToolName.IsEmpty()) Existing->ToolName = Event.ToolName;
+		if (!Event.Text.IsEmpty()) Existing->Text = Event.Text;
 		Existing->Status = Event.Type == EWorldDataAgentEventType::ToolCompleted ? TEXT("completed") : TEXT("running");
-		Existing->Text = Existing->Status;
 		break;
 	}
 	case EWorldDataAgentEventType::ApprovalRequested:
@@ -520,10 +535,10 @@ void UWorldDataAgentWebBridge::BindDraftConversation(const FString& DraftId, con
 	if (ActiveThreadId == DraftId) ActiveThreadId = ThreadId;
 }
 
-void UWorldDataAgentWebBridge::StartThread(const FString& DraftId)
+bool UWorldDataAgentWebBridge::StartThread(const FString& DraftId)
 {
 	FConversationSession* Session = FindSession(DraftId);
-	if (!Session || Session->bCreating) return;
+	if (!Session || Session->bCreating) return false;
 	Session->bCreating = true;
 	FWorldDataCreateThreadRequest Request;
 	Request.ClientConversationId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
@@ -537,14 +552,13 @@ void UWorldDataAgentWebBridge::StartThread(const FString& DraftId)
 		Session->bCreating = false;
 		Session->ErrorCode = TEXT("thread.create_not_started");
 		Session->ErrorMessage = TEXT("The conversation could not be created.");
+		return false;
 	}
-	else
-	{
-		PendingRequestThreadIds.Add(RequestId, DraftId);
-	}
+	PendingRequestThreadIds.Add(RequestId, DraftId);
+	return true;
 }
 
-void UWorldDataAgentWebBridge::SendTurn(const FString& ThreadId, const FString& Text)
+bool UWorldDataAgentWebBridge::SendTurn(const FString& ThreadId, const FString& Text)
 {
 	FConversationSession& Session = GetOrAddSession(ThreadId);
 	Session.bTurnActive = true;
@@ -560,11 +574,10 @@ void UWorldDataAgentWebBridge::SendTurn(const FString& ThreadId, const FString& 
 		Session.ActiveTurnId.Empty();
 		Session.ErrorCode = TEXT("turn.send_not_started");
 		Session.ErrorMessage = TEXT("The message could not be sent.");
+		return false;
 	}
-	else
-	{
-		PendingRequestThreadIds.Add(RequestId, ThreadId);
-	}
+	PendingRequestThreadIds.Add(RequestId, ThreadId);
+	return true;
 }
 
 UWorldDataAgentWebBridge::FConversationSession& UWorldDataAgentWebBridge::GetOrAddSession(const FString& ThreadId)
