@@ -6,6 +6,59 @@ class FJsonObject;
 
 namespace WorldDataMCP
 {
+	enum class EToolRisk : uint8
+	{
+		ReadOnly,
+		WorkspaceChange,
+		Destructive,
+		ArbitraryCode
+	};
+
+	// Mutating tools require a ContextEnvelope generated from a fresh editor
+	// read. Keeping this policy next to the tool definition prevents the HTTP
+	// router from having to infer behavior from a tool name.
+	enum class EToolRevisionPolicy : uint8
+	{
+		None,
+		RequireFreshContext
+	};
+
+	UEBRIDGEMCPCORE_API FString GetToolRiskName(EToolRisk Risk);
+	UEBRIDGEMCPCORE_API FString GetToolRevisionPolicyName(EToolRevisionPolicy Policy);
+
+	using FToolHandler = TFunction<FString(const TSharedPtr<FJsonObject>&)>;
+
+	// The registry owns the canonical runtime description of a tool. Providers
+	// may keep JSON schema text close to their implementation, but tools/list,
+	// dispatch, approval, capability checks, audit, and policy snapshots all
+	// read this one definition after registration.
+	struct UEBRIDGEMCPCORE_API FToolDefinition
+	{
+		FString Name;
+		FString ProviderName;
+		FString DefinitionJson;
+		FToolHandler Handler;
+		EToolRisk Risk = EToolRisk::Destructive;
+		TArray<FString> RequiredCapabilities;
+		bool bRequiresInteractiveApproval = true;
+		bool bAudited = true;
+		EToolRevisionPolicy RevisionPolicy = EToolRevisionPolicy::RequireFreshContext;
+	};
+
+	// Safe-to-copy view for governance and diagnostics. It deliberately omits
+	// the handler so callers cannot invoke a provider without going through the
+	// registry dispatch path.
+	struct UEBRIDGEMCPCORE_API FToolMetadata
+	{
+		FString Name;
+		FString ProviderName;
+		EToolRisk Risk = EToolRisk::Destructive;
+		TArray<FString> RequiredCapabilities;
+		bool bRequiresInteractiveApproval = true;
+		bool bAudited = true;
+		EToolRevisionPolicy RevisionPolicy = EToolRevisionPolicy::RequireFreshContext;
+	};
+
 	class UEBRIDGEMCPCORE_API IWorldDataMCPToolProvider
 	{
 	public:
@@ -25,20 +78,22 @@ namespace WorldDataMCP
 	class UEBRIDGEMCPCORE_API FToolRegistry
 	{
 	public:
-		using FToolHandler = TFunction<FString(const TSharedPtr<FJsonObject>&)>;
-
 		static FToolRegistry& Get();
 
-		void RegisterTool(const FString& Name, FToolHandler Handler);
-		void RegisterDefinitionSet(const FString& DefinitionsJson);
+		// Re-registering a name replaces the previous definition. This makes
+		// provider startup idempotent under Live Coding instead of duplicating
+		// entries in tools/list.
+		bool RegisterTool(FToolDefinition Definition);
+		void UnregisterProvider(const FString& ProviderName);
 		bool Dispatch(const FString& Name, const TSharedPtr<FJsonObject>& Arguments, FString& OutResult) const;
+		bool FindToolMetadata(const FString& Name, FToolMetadata& OutMetadata) const;
+		TArray<FToolMetadata> GetRegisteredToolMetadata() const;
 		FString GetRegisteredDefinitionsJson() const;
 		void Reset();
 
 	private:
 		mutable FRWLock Lock;
-		TMap<FString, FToolHandler> Handlers;
-		TArray<FString> DefinitionSets;
+		TMap<FString, FToolDefinition> Tools;
 	};
 
 	class UEBRIDGEMCPCORE_API FResourceRegistry
@@ -74,6 +129,7 @@ namespace WorldDataMCP
 
 		static FContextRegistry& Get();
 		void RegisterRevisionProvider(FWorldRevisionHandler InWorldRevision, FTargetRevisionHandler InTargetRevision);
+		void ClearRevisionProvider();
 		FString CaptureWorldRevision() const;
 		FString CaptureTargetRevision(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments) const;
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "WorldDataMCPToolRegistry.h"
 
 class FJsonObject;
 
@@ -9,13 +10,7 @@ class FJsonObject;
 // by a client that ignores tool annotations.
 namespace WorldDataMCP::ToolGovernance
 {
-	enum class EToolRisk : uint8
-	{
-		ReadOnly,
-		WorkspaceChange,
-		Destructive,
-		ArbitraryCode
-	};
+	using EToolRisk = WorldDataMCP::EToolRisk;
 
 	struct FCallerContext
 	{
@@ -50,6 +45,7 @@ namespace WorldDataMCP::ToolGovernance
 	EToolRisk GetRisk(const FString& ToolName);
 	FString GetRiskName(EToolRisk Risk);
 	bool RequiresInteractiveApproval(EToolRisk Risk);
+	bool RequiresInteractiveApproval(const FString& ToolName);
 
 	// Starts an audit record. Argument values are intentionally not retained.
 	FInvocation BeginInvocation(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments, const FCallerContext& Caller = FCallerContext());
@@ -61,8 +57,7 @@ namespace WorldDataMCP::ToolGovernance
 	// Writes a redacted JSONL audit record for every completed or denied call.
 	void CompleteInvocation(const FInvocation& Invocation, const FString& ResultJson);
 
-	// Exposes the current tool-to-risk matrix to MCP clients and appends matching
-	// metadata to tools/list without changing tool behavior.
+	// Exposes the registered tool policy to MCP clients. The registry is the
+	// source of truth for the risk/capability/revision metadata in this snapshot.
 	FString GetPolicySnapshotJson();
-	FString AddGovernanceMetadataToToolDefinitions(const FString& DefinitionsJson);
 }

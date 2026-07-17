@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "WorldDataMCPServer.h"
+#include "WorldDataMCPToolRegistry.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -30,6 +31,24 @@ namespace
 	{
 		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
 		return FJsonSerializer::Deserialize(Reader, OutObject) && OutObject.IsValid();
+	}
+
+	WorldDataMCP::FToolDefinition MakeTestTool(
+		const TCHAR* Name,
+		WorldDataMCP::FToolHandler Handler,
+		const TCHAR* ProviderName = TEXT("RegistryTest"))
+	{
+		WorldDataMCP::FToolDefinition Definition;
+		Definition.Name = Name;
+		Definition.ProviderName = ProviderName;
+		Definition.DefinitionJson = FString::Printf(
+			TEXT("{\"name\":\"%s\",\"description\":\"test\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}"),
+			Name);
+		Definition.Handler = MoveTemp(Handler);
+		Definition.Risk = WorldDataMCP::EToolRisk::ReadOnly;
+		Definition.bRequiresInteractiveApproval = false;
+		Definition.RevisionPolicy = WorldDataMCP::EToolRevisionPolicy::None;
+		return Definition;
 	}
 }
 
@@ -125,6 +144,70 @@ bool FUEBridgeMCPContextPreconditionTest::RunTest(const FString& Parameters)
 	TSharedPtr<FJsonObject> RejectedWrite = GetResult(FWorldDataMCPServer::ProcessJsonRpc(MakeRequest(TEXT("tools/call"), UnsafeWrite)));
 	bool bIsError = false;
 	TestTrue(TEXT("writes without a fresh ContextEnvelope are rejected"), RejectedWrite.IsValid() && RejectedWrite->TryGetBoolField(TEXT("isError"), bIsError) && bIsError);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUEBridgeMCPRegistryCallbackIsolationTest,
+	"UEBridgeMCP.Registry.CallbackIsolation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEBridgeMCPRegistryCallbackIsolationTest::RunTest(const FString& Parameters)
+{
+	WorldDataMCP::FToolRegistry ToolRegistry;
+	TestTrue(TEXT("initial tool registration succeeds"), ToolRegistry.RegisterTool(MakeTestTool(
+		TEXT("registry_reentrant"),
+		[&ToolRegistry](const TSharedPtr<FJsonObject>&)
+		{
+			ToolRegistry.RegisterTool(MakeTestTool(TEXT("registered_from_handler"), [](const TSharedPtr<FJsonObject>&)
+			{
+				return TEXT("nested");
+			}));
+			return TEXT("outer");
+		})));
+
+	FString Result;
+	TestTrue(TEXT("tool dispatch succeeds while its callback re-registers a tool"), ToolRegistry.Dispatch(TEXT("registry_reentrant"), MakeShared<FJsonObject>(), Result));
+	TestEqual(TEXT("reentrant callback result is returned"), Result, FString(TEXT("outer")));
+
+	TestTrue(TEXT("first duplicate registration succeeds"), ToolRegistry.RegisterTool(MakeTestTool(TEXT("replaceable"), [](const TSharedPtr<FJsonObject>&)
+	{
+		return TEXT("first");
+	})));
+	TestTrue(TEXT("duplicate registration replaces instead of appending"), ToolRegistry.RegisterTool(MakeTestTool(TEXT("replaceable"), [](const TSharedPtr<FJsonObject>&)
+	{
+		return TEXT("second");
+	})));
+	TestTrue(TEXT("replaced tool dispatch succeeds"), ToolRegistry.Dispatch(TEXT("replaceable"), MakeShared<FJsonObject>(), Result));
+	TestEqual(TEXT("replacement handler is authoritative"), Result, FString(TEXT("second")));
+
+	TArray<TSharedPtr<FJsonValue>> Definitions;
+	TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ToolRegistry.GetRegisteredDefinitionsJson());
+	TestTrue(TEXT("canonical registry definitions serialize"), FJsonSerializer::Deserialize(Reader, Definitions));
+	TestEqual(TEXT("tools/list has one entry per registered name"), Definitions.Num(), 3);
+
+	WorldDataMCP::FResourceRegistry ResourceRegistry;
+	ResourceRegistry.RegisterResource(TEXT("worlddata://test/reentrant"), TEXT("Reentrant"), TEXT("test"), [&ResourceRegistry]()
+	{
+		ResourceRegistry.RegisterResource(TEXT("worlddata://test/nested"), TEXT("Nested"), TEXT("test"), []
+		{
+			return TEXT("nested");
+		});
+		return TEXT("resource");
+	});
+	TestTrue(TEXT("resource callback can write registry without lock upgrade"), ResourceRegistry.Read(TEXT("worlddata://test/reentrant"), Result));
+	TestEqual(TEXT("resource callback result is returned"), Result, FString(TEXT("resource")));
+
+	WorldDataMCP::FContextRegistry ContextRegistry;
+	ContextRegistry.RegisterRevisionProvider([&ContextRegistry]()
+	{
+		ContextRegistry.ClearRevisionProvider();
+		return TEXT("world-revision");
+	}, [](const FString&, const TSharedPtr<FJsonObject>&)
+	{
+		return TEXT("target-revision");
+	});
+	TestEqual(TEXT("context callback can clear registry without lock upgrade"), ContextRegistry.CaptureWorldRevision(), FString(TEXT("world-revision")));
 	return true;
 }
 

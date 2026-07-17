@@ -546,14 +546,6 @@ namespace
 		return bEnabled;
 	}
 
-	static bool IsProjectFileTool(const FString& ToolName)
-	{
-		return ToolName == TEXT("read_file")
-			|| ToolName == TEXT("write_file")
-			|| ToolName == TEXT("delete_file")
-			|| ToolName == TEXT("rename_file");
-	}
-
 	static FString GenerateAccessToken()
 	{
 		return FGuid::NewGuid().ToString(EGuidFormats::Digits)
@@ -834,17 +826,32 @@ namespace
 
 	static FString GetToolCapabilityError(const FString& ToolName)
 	{
-		if (IsProjectFileTool(ToolName) && !GetProjectSecurityFlag(TEXT("bEnableProjectFileTools")))
+		WorldDataMCP::FToolMetadata Metadata;
+		if (!WorldDataMCP::FToolRegistry::Get().FindToolMetadata(ToolName, Metadata))
 		{
-			return TEXT("Project file tools are disabled by default. Set [UEBridgeMCP.Security] bEnableProjectFileTools=true only for a trusted local automation session.");
+			return FString::Printf(TEXT("Tool '%s' is not registered."), *ToolName);
 		}
-		if (ToolName == TEXT("set_actor_property") && !GetProjectSecurityFlag(TEXT("bEnableReflectedPropertyWrites")))
+
+		for (const FString& Capability : Metadata.RequiredCapabilities)
 		{
-			return TEXT("Generic reflected property writes are disabled by default. Prefer dedicated structured tools, or explicitly enable [UEBridgeMCP.Security] bEnableReflectedPropertyWrites=true for a trusted local automation session.");
-		}
-		if (ToolName == TEXT("execute_python") && !FWorldDataMCPServer::IsUnsafePythonEnabled())
-		{
-			return TEXT("execute_python is disabled by [UEBridgeMCP.Security] bEnableUnsafePython.");
+			if (Capability == TEXT("project_file_tools") && !GetProjectSecurityFlag(TEXT("bEnableProjectFileTools")))
+			{
+				return TEXT("Project file tools are disabled by default. Set [UEBridgeMCP.Security] bEnableProjectFileTools=true only for a trusted local automation session.");
+			}
+			if (Capability == TEXT("reflected_property_writes") && !GetProjectSecurityFlag(TEXT("bEnableReflectedPropertyWrites")))
+			{
+				return TEXT("Generic reflected property writes are disabled by default. Prefer dedicated structured tools, or explicitly enable [UEBridgeMCP.Security] bEnableReflectedPropertyWrites=true for a trusted local automation session.");
+			}
+			if (Capability == TEXT("unsafe_python") && !FWorldDataMCPServer::IsUnsafePythonEnabled())
+			{
+				return TEXT("execute_python is disabled by [UEBridgeMCP.Security] bEnableUnsafePython.");
+			}
+			if (Capability != TEXT("project_file_tools")
+				&& Capability != TEXT("reflected_property_writes")
+				&& Capability != TEXT("unsafe_python"))
+			{
+				return FString::Printf(TEXT("Tool '%s' requires unsupported capability '%s' and is disabled."), *ToolName, *Capability);
+			}
 		}
 		return FString();
 	}
@@ -1760,17 +1767,60 @@ void FWorldDataMCPServer::ProvisionClientConfigurations()
 	LastError.Empty();
 }
 
+namespace
+{
+	void EnsureCoreToolsRegistered();
+}
+
 FString FWorldDataMCPServer::GetToolDefinitionsJson()
 {
+	EnsureCoreToolsRegistered();
 	const FString RegisteredDefinitions = WorldDataMCP::FToolRegistry::Get().GetRegisteredDefinitionsJson();
-	const FString WithResponseControl = WorldDataMCP::ResponseContext::AddResponseControlToToolDefinitions(RegisteredDefinitions);
-	return WorldDataMCP::ToolGovernance::AddGovernanceMetadataToToolDefinitions(WithResponseControl);
+	return WorldDataMCP::ResponseContext::AddResponseControlToToolDefinitions(RegisteredDefinitions);
 }
 
 namespace
 {
+	void RegisterCoreReadOnlyTool(const TCHAR* Name, const TCHAR* DefinitionJson, WorldDataMCP::FToolHandler Handler)
+	{
+		WorldDataMCP::FToolDefinition Definition;
+		Definition.Name = Name;
+		Definition.ProviderName = TEXT("UEBridgeMCPCore");
+		Definition.DefinitionJson = DefinitionJson;
+		Definition.Handler = MoveTemp(Handler);
+		Definition.Risk = WorldDataMCP::EToolRisk::ReadOnly;
+		Definition.bRequiresInteractiveApproval = false;
+		Definition.bAudited = true;
+		Definition.RevisionPolicy = WorldDataMCP::EToolRevisionPolicy::None;
+		ensureMsgf(WorldDataMCP::FToolRegistry::Get().RegisterTool(MoveTemp(Definition)), TEXT("Failed to register Core MCP tool '%s'."), Name);
+	}
+
+	void EnsureCoreToolsRegistered()
+	{
+		RegisterCoreReadOnlyTool(
+			TEXT("get_current_project_info"),
+			TEXT(R"JSON({"name":"get_current_project_info","description":"Return the UE project identity and MCP endpoint for this editor session.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Get Project Info","readOnlyHint":true,"openWorldHint":false}})JSON"),
+			[](const TSharedPtr<FJsonObject>&) { return FWorldDataMCPServer::GetProjectInfoJson(); });
+		RegisterCoreReadOnlyTool(
+			TEXT("get_mcp_governance"),
+			TEXT(R"JSON({"name":"get_mcp_governance","description":"Return the registered UEBridgeMCP tool risk matrix, capability policy, interactive-approval policy, and redacted audit-log location.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"MCP Governance","readOnlyHint":true,"openWorldHint":false}})JSON"),
+			[](const TSharedPtr<FJsonObject>&) { return WorldDataMCP::ToolGovernance::GetPolicySnapshotJson(); });
+		RegisterCoreReadOnlyTool(
+			TEXT("get_codex_policy_snapshot"),
+			TEXT(R"JSON({"name":"get_codex_policy_snapshot","description":"Read a redacted snapshot of explicit local Codex policy: approval_policy, sandbox_mode, active profile, model, and non-secret MCP enablement/type metadata. Command lines, arguments, paths, URLs, environment values, hidden prompts, and runtime secrets are omitted.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Codex Policy Snapshot","readOnlyHint":true,"openWorldHint":false}})JSON"),
+			[](const TSharedPtr<FJsonObject>&) { return GetCodexPolicySnapshotJson(); });
+		// Job status is resolved directly in HandleToolsCall because it must bind
+		// the job to the caller's authenticated session. Its definition still
+		// lives here so tools/list and governance have the same source of truth.
+		RegisterCoreReadOnlyTool(
+			TEXT("get_mcp_job_status"),
+			TEXT(R"JSON({"name":"get_mcp_job_status","description":"Read the status and final structured result of an asynchronous MCP tool job. Mutating tools return a jobId and approvalId immediately, then remain awaiting_approval until the Unreal Editor user decides. Read-only long-running tools may use arguments.worlddataAsync=true.","inputSchema":{"type":"object","properties":{"jobId":{"type":"string","description":"Job identifier returned by an asynchronous or approval-gated tool call."}},"required":["jobId"]},"annotations":{"title":"Get MCP Job Status","readOnlyHint":true,"openWorldHint":false}})JSON"),
+			[](const TSharedPtr<FJsonObject>&) { return ErrorJson(TEXT("get_mcp_job_status must be dispatched by the authenticated MCP request path.")); });
+	}
+
 	void RegisterCoreResources()
 	{
+		EnsureCoreToolsRegistered();
 		auto& Resources = WorldDataMCP::FResourceRegistry::Get();
 		Resources.RegisterResource(TEXT("worlddata://project/info"), TEXT("Project Info"), TEXT("Project identity, paths, MCP endpoint, and process details."), []
 		{
@@ -2364,6 +2414,7 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsList(const TSharedPtr<FJ
 
 TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsCall(const TSharedPtr<FJsonObject>& Params)
 {
+	EnsureCoreToolsRegistered();
 	FString ToolName;
 	if (!Params->TryGetStringField(TEXT("name"), ToolName))
 	{
@@ -2385,9 +2436,15 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsCall(const TSharedPtr<FJ
 	{
 		(*CallerObject)->TryGetStringField(TEXT("sessionId"), CallerSessionId);
 	}
-	const WorldDataMCP::ToolGovernance::EToolRisk ToolRisk = WorldDataMCP::ToolGovernance::GetRisk(ToolName);
+	WorldDataMCP::FToolMetadata ToolMetadata;
+	const bool bKnownTool = WorldDataMCP::FToolRegistry::Get().FindToolMetadata(ToolName, ToolMetadata);
+	const WorldDataMCP::ToolGovernance::EToolRisk ToolRisk = bKnownTool
+		? ToolMetadata.Risk
+		: WorldDataMCP::ToolGovernance::EToolRisk::Destructive;
 	const bool bMutatingTool = ToolRisk != WorldDataMCP::ToolGovernance::EToolRisk::ReadOnly;
-	FString ContextValidationError;
+	FString ContextValidationError = bKnownTool
+		? FString()
+		: FString::Printf(TEXT("Unknown or unavailable MCP tool '%s'."), *ToolName);
 	FString RequestedTaskId;
 	FString RequestedThreadId;
 	FString ExpectedWorldRevision;
@@ -2425,7 +2482,7 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsCall(const TSharedPtr<FJ
 	FString SessionThreadId;
 	MutableCaller->TryGetStringField(TEXT("taskId"), SessionTaskId);
 	MutableCaller->TryGetStringField(TEXT("threadId"), SessionThreadId);
-	if (bMutatingTool)
+	if (bMutatingTool && ContextValidationError.IsEmpty())
 	{
 		if (ExpectedWorldRevision.IsEmpty() || ExpectedObjectRevision.IsEmpty())
 		{
@@ -2464,7 +2521,7 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsCall(const TSharedPtr<FJ
 	{
 		ToolResult = ErrorJson(ResponseControlError);
 	}
-	else if (WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(ToolRisk))
+	else if (WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(ToolName))
 	{
 		// Mutations never open a modal dialog and never keep this HTTP worker alive.
 		// The returned job is resumed only after the editor-panel approval card binds
@@ -2543,8 +2600,7 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::HandleToolsCall(const TSharedPtr<FJ
 		// keeps the async task safe even if we abandon the wait.
 		// Mutating calls may open an editor-owned confirmation dialog. Allow a
 		// deliberate user decision without prematurely expiring the HTTP request.
-		const double ToolDispatchTimeoutSeconds = WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(
-			WorldDataMCP::ToolGovernance::GetRisk(ToolName)) ? 300.0 : 60.0;
+		const double ToolDispatchTimeoutSeconds = WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(ToolName) ? 300.0 : 60.0;
 
 		const int32 PendingBeforeEnqueue = GPendingGameThreadToolDispatches.fetch_add(1);
 		if (PendingBeforeEnqueue >= GMaxPendingGameThreadToolDispatches)
@@ -2682,6 +2738,7 @@ static FString DispatchAuthorizedTool(const FString& ToolName, const TSharedPtr<
 
 FString FWorldDataMCPServer::DispatchTool(const FString& ToolName, const FString& ArgsJson)
 {
+	EnsureCoreToolsRegistered();
 	TSharedPtr<FJsonObject> Args = ParseObject(ArgsJson);
 	if (!Args.IsValid())
 	{
@@ -2703,7 +2760,7 @@ FString FWorldDataMCPServer::DispatchTool(const FString& ToolName, const FString
 		WorldDataMCP::ToolGovernance::CompleteInvocation(Invocation, DisabledResult);
 		return AddContextEnvelopeToResultJson(DisabledResult, Caller, ToolName, CurrentObjectRevision);
 	}
-	if (WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(Invocation.Risk))
+	if (WorldDataMCP::ToolGovernance::RequiresInteractiveApproval(ToolName))
 	{
 		const FString ErrorResult = ErrorJson(TEXT("Mutating tools must be resumed through the server-owned non-modal approval job."));
 		WorldDataMCP::ToolGovernance::CompleteInvocation(Invocation, ErrorResult);
@@ -2717,19 +2774,6 @@ FString FWorldDataMCPServer::DispatchTool(const FString& ToolName, const FString
 
 static FString DispatchAuthorizedTool(const FString& ToolName, const TSharedPtr<FJsonObject>& Args)
 {
-	if (ToolName == TEXT("get_current_project_info"))
-	{
-		return FWorldDataMCPServer::GetProjectInfoJson();
-	}
-	if (ToolName == TEXT("get_mcp_governance"))
-	{
-		return WorldDataMCP::ToolGovernance::GetPolicySnapshotJson();
-	}
-	if (ToolName == TEXT("get_codex_policy_snapshot"))
-	{
-		return GetCodexPolicySnapshotJson();
-	}
-
 	return DispatchRegisteredTool(ToolName, Args);
 }
 

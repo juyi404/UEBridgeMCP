@@ -11,10 +11,8 @@
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
-#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
 
 #include "WorldDataMCPCommon.h"
 
@@ -23,48 +21,6 @@ namespace WorldDataMCP::ToolGovernance
 	namespace
 	{
 		FCriticalSection GAuditFileMutex;
-
-		const TSet<FString>& GetWorkspaceChangeTools()
-		{
-			static const TSet<FString> Tools = {
-				TEXT("spawn_actor"), TEXT("transform_actor"),
-				TEXT("attach_actor"), TEXT("set_actor_property"), TEXT("play_in_editor"),
-				TEXT("stop_pie")
-			};
-			return Tools;
-		}
-
-		const TSet<FString>& GetDestructiveTools()
-		{
-			static const TSet<FString> Tools = {
-				TEXT("delete_actor"), TEXT("save_current_level"), TEXT("create_asset"),
-				TEXT("create_blueprint_asset"), TEXT("modify_material_instance"),
-				TEXT("create_pcg_graph_from_recipe"), TEXT("write_file"),
-				TEXT("delete_file"), TEXT("rename_file")
-			};
-			return Tools;
-		}
-
-		const TArray<FString>& GetKnownToolNames()
-		{
-			static const TArray<FString> Names = {
-				TEXT("get_mcp_governance"), TEXT("get_current_project_info"), TEXT("list_level_actors"),
-				TEXT("get_mcp_job_status"),
-				TEXT("get_selected_actors"), TEXT("get_actor_details"), TEXT("find_assets"),
-				TEXT("read_asset"), TEXT("get_content_summary"), TEXT("select_actor"),
-				TEXT("spawn_actor"), TEXT("transform_actor"), TEXT("delete_actor"),
-				TEXT("attach_actor"), TEXT("set_actor_property"), TEXT("save_current_level"),
-				TEXT("create_asset"), TEXT("create_blueprint_asset"), TEXT("modify_material_instance"),
-				TEXT("create_pcg_graph_from_recipe"), TEXT("get_codex_policy_snapshot"),
-				TEXT("read_log"), TEXT("execute_python"),
-				TEXT("search_assets"), TEXT("find_static_meshes"), TEXT("get_level_actors"),
-				TEXT("get_project_info"), TEXT("list_project_modules"), TEXT("get_build_configuration"),
-				TEXT("read_file"), TEXT("write_file"), TEXT("delete_file"), TEXT("rename_file"),
-				TEXT("play_in_editor"), TEXT("stop_pie"), TEXT("pcg_recipe_library_status"),
-				TEXT("search_pcg_recipes"), TEXT("read_pcg_recipe"), TEXT("read_pcg_scene_binding")
-			};
-			return Names;
-		}
 
 		bool IsInteractiveApprovalEnabled()
 		{
@@ -188,55 +144,35 @@ namespace WorldDataMCP::ToolGovernance
 
 	EToolRisk GetRisk(const FString& ToolName)
 	{
-		if (ToolName == TEXT("select_actor"))
+		FToolMetadata Metadata;
+		if (FToolRegistry::Get().FindToolMetadata(ToolName, Metadata))
 		{
-			// Selection changes only the local editor UI; it does not mutate the
-			// world or project content.
-			return EToolRisk::ReadOnly;
-		}
-		if (ToolName == TEXT("execute_python"))
-		{
-			return EToolRisk::ArbitraryCode;
-		}
-		if (GetDestructiveTools().Contains(ToolName))
-		{
-			return EToolRisk::Destructive;
-		}
-		if (GetWorkspaceChangeTools().Contains(ToolName))
-		{
-			return EToolRisk::WorkspaceChange;
-		}
-		if (ToolName.StartsWith(TEXT("get_"))
-			|| ToolName.StartsWith(TEXT("list_"))
-			|| ToolName.StartsWith(TEXT("read_"))
-			|| ToolName.StartsWith(TEXT("find_"))
-			|| ToolName.StartsWith(TEXT("search_"))
-			|| ToolName == TEXT("pcg_recipe_library_status"))
-		{
-			return EToolRisk::ReadOnly;
+			return Metadata.Risk;
 		}
 
-		// New tools must opt into a precise classification. Until then, require
-		// editor approval so a future mutating extension cannot silently inherit
-		// read-only treatment.
+		// Unknown tools are always fail-closed. HandleToolsCall rejects them before
+		// dispatch, but this protects every secondary invocation path as well.
 		return EToolRisk::Destructive;
 	}
 
 	FString GetRiskName(const EToolRisk Risk)
 	{
-		switch (Risk)
-		{
-		case EToolRisk::ReadOnly: return TEXT("read_only");
-		case EToolRisk::WorkspaceChange: return TEXT("workspace_change");
-		case EToolRisk::Destructive: return TEXT("destructive");
-		case EToolRisk::ArbitraryCode: return TEXT("arbitrary_code");
-		default: return TEXT("unknown");
-		}
+		return GetToolRiskName(Risk);
 	}
 
 	bool RequiresInteractiveApproval(const EToolRisk Risk)
 	{
 		return IsInteractiveApprovalEnabled() && Risk != EToolRisk::ReadOnly;
+	}
+
+	bool RequiresInteractiveApproval(const FString& ToolName)
+	{
+		FToolMetadata Metadata;
+		if (!FToolRegistry::Get().FindToolMetadata(ToolName, Metadata))
+		{
+			return true;
+		}
+		return IsInteractiveApprovalEnabled() && Metadata.bRequiresInteractiveApproval;
 	}
 
 	FInvocation BeginInvocation(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments, const FCallerContext& Caller)
@@ -289,64 +225,24 @@ namespace WorldDataMCP::ToolGovernance
 		Result->SetStringField(TEXT("auditFormat"), TEXT("redacted JSON Lines; values and secret-capable argument contents are not stored."));
 
 		TArray<TSharedPtr<FJsonValue>> Tools;
-		for (const FString& ToolName : GetKnownToolNames())
+		for (const FToolMetadata& Metadata : FToolRegistry::Get().GetRegisteredToolMetadata())
 		{
-			const EToolRisk Risk = GetRisk(ToolName);
 			TSharedRef<FJsonObject> Tool = MakeShared<FJsonObject>();
-			Tool->SetStringField(TEXT("name"), ToolName);
-			Tool->SetStringField(TEXT("risk"), GetRiskName(Risk));
-			Tool->SetBoolField(TEXT("requiresInteractiveApproval"), RequiresInteractiveApproval(Risk));
-			Tool->SetBoolField(TEXT("audited"), true);
+			Tool->SetStringField(TEXT("name"), Metadata.Name);
+			Tool->SetStringField(TEXT("provider"), Metadata.ProviderName);
+			Tool->SetStringField(TEXT("risk"), GetRiskName(Metadata.Risk));
+			Tool->SetBoolField(TEXT("requiresInteractiveApproval"), RequiresInteractiveApproval(Metadata.Name));
+			Tool->SetBoolField(TEXT("audited"), Metadata.bAudited);
+			Tool->SetStringField(TEXT("revisionPolicy"), GetToolRevisionPolicyName(Metadata.RevisionPolicy));
+			TArray<TSharedPtr<FJsonValue>> Capabilities;
+			for (const FString& Capability : Metadata.RequiredCapabilities)
+			{
+				Capabilities.Add(MakeShared<FJsonValueString>(Capability));
+			}
+			Tool->SetArrayField(TEXT("requiredCapabilities"), Capabilities);
 			Tools.Add(MakeShared<FJsonValueObject>(Tool));
 		}
 		Result->SetArrayField(TEXT("tools"), Tools);
 		return JsonObjectToString(Result);
-	}
-
-	FString AddGovernanceMetadataToToolDefinitions(const FString& DefinitionsJson)
-	{
-		TArray<TSharedPtr<FJsonValue>> Tools;
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(DefinitionsJson);
-		if (!FJsonSerializer::Deserialize(Reader, Tools))
-		{
-			return DefinitionsJson;
-		}
-
-		for (const TSharedPtr<FJsonValue>& Value : Tools)
-		{
-			const TSharedPtr<FJsonObject> Tool = Value.IsValid() ? Value->AsObject() : nullptr;
-			if (!Tool.IsValid())
-			{
-				continue;
-			}
-			FString Name;
-			if (!Tool->TryGetStringField(TEXT("name"), Name))
-			{
-				continue;
-			}
-
-			const TSharedPtr<FJsonObject>* ExistingAnnotations = nullptr;
-			TSharedPtr<FJsonObject> Annotations;
-			if (Tool->TryGetObjectField(TEXT("annotations"), ExistingAnnotations) && ExistingAnnotations && ExistingAnnotations->IsValid())
-			{
-				Annotations = *ExistingAnnotations;
-			}
-			else
-			{
-				Annotations = MakeShared<FJsonObject>();
-				Tool->SetObjectField(TEXT("annotations"), Annotations.ToSharedRef());
-			}
-
-			const EToolRisk Risk = GetRisk(Name);
-			Annotations->SetStringField(TEXT("worldDataRisk"), GetRiskName(Risk));
-			Annotations->SetBoolField(TEXT("worldDataInteractiveApproval"), RequiresInteractiveApproval(Risk));
-			Annotations->SetBoolField(TEXT("worldDataAudited"), true);
-		}
-
-		FString Out;
-		TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
-			TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Out);
-		FJsonSerializer::Serialize(Tools, Writer);
-		return Out;
 	}
 }
