@@ -9,6 +9,9 @@
 	"CanContainContent": false,
 	"IsBetaVersion": true,
 	"Installed": false,
+	"SupportedTargetPlatforms": [
+		"Win64"
+	],
 	"Modules": [
 		{
 			"Name": "WorldDataAgentContracts",

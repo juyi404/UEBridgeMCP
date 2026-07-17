@@ -6,9 +6,13 @@ if (!hostExecutable || !codexExecutable || !projectRoot || !mcpUrl || !process.e
   process.exit(2);
 }
 
+const mcpToken = process.env.WORLDDATA_MCP_TOKEN;
+const childEnvironment = { ...process.env };
+delete childEnvironment.WORLDDATA_MCP_TOKEN;
+
 const child = spawn(hostExecutable, [], {
   cwd: projectRoot,
-  env: process.env,
+  env: childEnvironment,
   stdio: ["pipe", "pipe", "pipe"],
   windowsHide: true,
 });
@@ -25,7 +29,7 @@ let timeout;
 const diagnostics = [];
 
 function send(id, type, payload) {
-  child.stdin.write(`${JSON.stringify({ protocolVersion: 1, id, type, payload })}\n`);
+  child.stdin.write(`${JSON.stringify({ protocolVersion: 2, id, type, payload })}\n`);
 }
 
 function finish(code) {
@@ -108,6 +112,7 @@ send("connect", "connect", {
   codexExecutable,
   projectRoot,
   mcpUrl,
+  mcpToken,
   clientVersion: "0.3.0",
 });
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Queue.h"
 #include "HAL/Runnable.h"
 #include "HAL/PlatformProcess.h"
 
@@ -15,9 +16,7 @@ public:
 
 	bool Launch(
 		const FString& Executable,
-		const FString& WorkingDirectory,
-		const FString& SecretEnvironmentVariable,
-		const FString& SecretValue);
+		const FString& WorkingDirectory);
 	bool SendJsonLine(const FString& Json);
 	void RequestStop(bool bKillProcessTree);
 	bool IsRunning() const;

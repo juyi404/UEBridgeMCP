@@ -1,16 +1,12 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const hostRoot = resolve(testsDirectory, "..");
 const projectRoot = resolve(hostRoot, "../..");
-const standalonePluginSource = join(projectRoot, "Source");
-const embeddedPluginSource = join(projectRoot, "Plugins", "UEBridgeMCP", "Source");
-const pluginSource = existsSync(standalonePluginSource)
-  ? standalonePluginSource
-  : embeddedPluginSource;
-const schemaPath = join(hostRoot, "protocol", "worlddata-agent-host-v1.schema.json");
+const pluginSource = join(projectRoot, "Plugins", "UEBridgeMCP", "Source");
+const schemaPath = join(hostRoot, "protocol", "worlddata-agent-host-v2.schema.json");
 const applicationPath = join(hostRoot, "WorldData.AgentHost.App", "AgentHostApplication.cs");
 
 const implementationModules = [

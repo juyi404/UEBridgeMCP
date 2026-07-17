@@ -188,7 +188,55 @@
   function renderToolMessage(item) {
     const status = item.status || "pending";
     const detail = item.text && item.text !== status ? `<code class="tool-detail">${escapeHtml(item.text)}</code>` : "";
-    return `<article class="message message--tool ${escapeHtml(status)}"><span class="message__role">TOOL · ${escapeHtml(item.toolName || "工具调用")}</span><div class="message__body"><span class="tool-state" aria-hidden="true"></span><span class="tool-status">${escapeHtml(toolStatusLabel(status))}</span>${detail}</div></article>`;
+    return `<li class="tool-batch__item ${escapeHtml(status)}"><code class="tool-batch__name">${escapeHtml(item.toolName || "工具调用")}</code><span class="tool-status">${escapeHtml(toolStatusLabel(status))}</span>${detail}</li>`;
+  }
+
+  function renderToolBatch(items) {
+    const failed = items.some(item => item.status === "failed");
+    const running = items.some(item => item.status === "running" || item.status === "pending");
+    const status = failed ? "failed" : (running ? "running" : "completed");
+    const summary = failed
+      ? `后台处理 · ${items.length} 项中有失败`
+      : (running ? `后台处理 · ${items.length} 项进行中` : `后台处理 · ${items.length} 项已完成`);
+    return `<details class="tool-batch ${status}"${status === "completed" ? "" : " open"}>
+      <summary class="tool-batch__summary"><span class="tool-state" aria-hidden="true"></span><span class="tool-batch__label">${summary}</span><span class="tool-batch__toggle">详情</span></summary>
+      <ul class="tool-batch__list">${items.map(renderToolMessage).join("")}</ul>
+    </details>`;
+  }
+
+  function renderActivityBatch(items) {
+    const running = items.some(item => item.status === "running" || item.status === "pending");
+    const summary = running ? `正在处理 · ${items.length} 项活动` : `处理完成 · ${items.length} 项活动`;
+    return `<details class="activity-batch ${running ? "running" : "completed"}"${running ? " open" : ""}>
+      <summary class="activity-batch__summary"><span class="activity-batch__state" aria-hidden="true"></span><span>${summary}</span><span class="activity-batch__toggle">详情</span></summary>
+      <ul class="activity-batch__list">${items.map(item => `<li>${escapeHtml(item.text || "正在处理")}</li>`).join("")}</ul>
+    </details>`;
+  }
+
+  function renderConversationItems(items) {
+    const output = [];
+    for (let index = 0; index < items.length;) {
+      const item = items[index];
+      if (item.kind === "tool") {
+        const batch = [];
+        while (index < items.length && items[index].kind === "tool") batch.push(items[index++]);
+        output.push(renderToolBatch(batch));
+        continue;
+      }
+      if (item.kind === "activity") {
+        const batch = [];
+        while (index < items.length && items[index].kind === "activity") batch.push(items[index++]);
+        output.push(renderActivityBatch(batch));
+        continue;
+      }
+      const role = item.role === "user" ? "user" : "assistant";
+      const body = role === "user"
+        ? `<div class="message-body">${escapeHtml(item.text)}</div>`
+        : `<div class="message-markdown">${renderMarkdown(item.text)}</div>`;
+      output.push(`<article class="message message--${role}"><span class="message__role">${role === "user" ? "你" : "CODEX"}</span>${body}</article>`);
+      index += 1;
+    }
+    return output.join("");
   }
 
   function renderConversation(next) {
@@ -201,14 +249,7 @@
       elements.messageList.innerHTML = `<div class="empty-state"><strong>今天我能帮您做什么？</strong><span>连接完成后，可直接操作当前 Unreal 项目。</span></div>`;
       return;
     }
-    elements.messageList.innerHTML = next.conversation.map(item => {
-      if (item.kind === "tool") return renderToolMessage(item);
-      const role = item.role === "user" ? "user" : "assistant";
-      const body = role === "user"
-        ? `<div class="message-body">${escapeHtml(item.text)}</div>`
-        : `<div class="message-markdown">${renderMarkdown(item.text)}</div>`;
-      return `<article class="message message--${role}"><span class="message__role">${role === "user" ? "你" : "CODEX"}</span>${body}</article>`;
-    }).join("");
+    elements.messageList.innerHTML = renderConversationItems(next.conversation);
     if (wasNearBottom) elements.messageList.scrollTop = elements.messageList.scrollHeight;
     else elements.messageList.scrollTop = previousScrollTop;
   }
@@ -225,6 +266,8 @@
         state: connection.state,
         statusText: connection.statusText,
         mcpConnected: connection.mcpConnected,
+        mcpToolCount: connection.mcpToolCount,
+        mcpStatus: connection.mcpStatus,
         authenticated: connection.authenticated,
         models: connection.models
       },
@@ -251,7 +294,7 @@
       </article>
       <article class="settings-card">
         <div class="settings-card__head"><div><h3 class="settings-card__title">WorldData MCP</h3><p class="settings-card__description">每个 Codex 线程自动注入本地服务和临时认证头。</p></div><span class="server-state ${connection.mcpConnected ? "" : "is-stopped"}">${connection.mcpConnected ? "线程已连接" : "等待会话"}</span></div>
-        <div class="client-banner"><span class="client-banner__mark">MCP</span><span>${escapeHtml(connectionLabel(connection))}</span></div>
+        <div class="client-banner"><span class="client-banner__mark">MCP</span><span>${escapeHtml(connectionLabel(connection))}${connection.mcpStatus ? ` · ${escapeHtml(connection.mcpStatus)}` : ""} · ${Number(connection.mcpToolCount || 0)} 工具</span></div>
         <div class="settings-actions"><button id="refresh-settings" class="button button--quiet" type="button">刷新会话</button></div>
       </article>
       <article class="settings-card settings-card--wide">
@@ -265,7 +308,7 @@
       </article>
       <article class="settings-card settings-card--wide">
         <div class="settings-card__head"><div><h3 class="settings-card__title">安全连接</h3><p class="settings-card__description">浏览器只接收稳定状态 JSON；MCP 密钥仅存在于编辑器内存和受信任子进程环境。</p></div><span class="server-state">本地保护</span></div>
-        <div class="security-grid"><div class="security-option"><div class="security-option__copy"><span class="security-option__title">Agent Host IPC v1</span><span class="security-option__help">有界 JSONL 帧、协议版本校验和明确错误代码。</span></div><span class="chip">STDIO</span></div><div class="security-option"><div class="security-option__copy"><span class="security-option__title">线程级 MCP</span><span class="security-option__help">临时认证头不会进入 HTML、配置文件或诊断日志。</span></div><span class="chip">EPHEMERAL</span></div></div>
+        <div class="security-grid"><div class="security-option"><div class="security-option__copy"><span class="security-option__title">Agent Host IPC v2</span><span class="security-option__help">有界 JSONL 帧、会话序号、协议版本校验和明确错误代码。</span></div><span class="chip">STDIO</span></div><div class="security-option"><div class="security-option__copy"><span class="security-option__title">线程级 MCP</span><span class="security-option__help">临时认证头不会进入 HTML、配置文件或诊断日志。</span></div><span class="chip">EPHEMERAL</span></div></div>
       </article>`;
     document.querySelector("#configure-runtime")?.addEventListener("click", () => { void runAction("配置运行时", "configure", () => invoke("configureruntime")); });
     document.querySelector("#refresh-settings")?.addEventListener("click", () => { void refreshThreads(); });

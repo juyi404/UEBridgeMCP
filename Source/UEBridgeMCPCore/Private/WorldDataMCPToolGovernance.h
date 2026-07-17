@@ -34,12 +34,12 @@ namespace WorldDataMCP::ToolGovernance
 		EToolRisk Risk = EToolRisk::ReadOnly;
 		FDateTime StartedAtUtc;
 		TArray<FString> ArgumentNames;
-	FString ArgumentFingerprint;
-	FCallerContext Caller;
-	FString ApprovalId;
-	FString ChangeSummaryHash;
-	FString TargetRevision;
-	FString WorldRevision;
+		FString ArgumentFingerprint;
+		FCallerContext Caller;
+		FString ApprovalId;
+		FString ChangeSummaryFingerprint;
+		FString TargetRevision;
+		FString WorldRevision;
 	};
 
 	EToolRisk GetRisk(const FString& ToolName);

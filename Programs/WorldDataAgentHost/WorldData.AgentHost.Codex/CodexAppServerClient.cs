@@ -9,12 +9,15 @@ namespace WorldData.AgentHost.Codex;
 
 internal sealed class CodexAppServerClient : ICodexClient
 {
+    private const string McpTokenEnvironmentVariable = "WORLDDATA_MCP_TOKEN";
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> pending = new();
     private readonly ConcurrentDictionary<string, PendingServerRequest> pendingApprovals = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, McpConnectionInfo> threadMcpStatus = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<McpConnectionInfo>> mcpReadiness = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private Process? process;
+    private WindowsChildProcessJob? childProcessJob;
     private Task? stdoutTask;
     private Task? stderrTask;
     private long nextRpcId;
@@ -33,13 +36,14 @@ internal sealed class CodexAppServerClient : ICodexClient
             throw new FileNotFoundException("Codex executable must be an existing absolute path.", options.Executable);
         }
 
-        var mcpBearerToken = Environment.GetEnvironmentVariable(AgentHostProtocol.McpTokenEnvironmentVariable);
-        if (string.IsNullOrWhiteSpace(mcpBearerToken))
+        if (string.IsNullOrWhiteSpace(options.McpToken))
         {
-            throw new InvalidOperationException("The inherited MCP credential is unavailable.");
+            throw new InvalidOperationException("The private MCP credential is unavailable.");
         }
 
-        startOptions = options;
+        // Keep the credential only in the child Codex process environment. The
+        // retained options are deliberately scrubbed once process startup begins.
+        startOptions = options with { McpToken = string.Empty };
         var startInfo = new ProcessStartInfo
         {
             FileName = options.Executable,
@@ -54,13 +58,21 @@ internal sealed class CodexAppServerClient : ICodexClient
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false)
         };
-        startInfo.Environment[AgentHostProtocol.McpTokenEnvironmentVariable] = mcpBearerToken;
-        Environment.SetEnvironmentVariable(AgentHostProtocol.McpTokenEnvironmentVariable, null);
+        startInfo.Environment[McpTokenEnvironmentVariable] = options.McpToken;
 
         process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        process.Exited += (_, _) => OnCodexExited();
         if (!process.Start())
         {
             throw new InvalidOperationException("Failed to launch Codex app-server.");
+        }
+        childProcessJob = WindowsChildProcessJob.TryAttach(process);
+        if (OperatingSystem.IsWindows() && childProcessJob is null)
+        {
+            process.Kill(entireProcessTree: true);
+            process.Dispose();
+            process = null;
+            throw new InvalidOperationException("Failed to assign Codex app-server to the Host lifecycle job.");
         }
 
         stdoutTask = ReadStdoutAsync(process.StandardOutput, lifetime.Token);
@@ -111,7 +123,9 @@ internal sealed class CodexAppServerClient : ICodexClient
                 ["cwd"] = startOptions!.ProjectRoot,
                 ["limit"] = requestedLimit - threads.Count,
                 ["archived"] = false,
-                ["sortKey"] = "recency_at",
+                // Current Codex app-server accepts created_at/updated_at only;
+                // Host still performs its own stable recency ordering afterwards.
+                ["sortKey"] = "updated_at",
                 ["sortDirection"] = "desc"
             };
             if (!string.IsNullOrWhiteSpace(pageCursor)) parameters["cursor"] = pageCursor;
@@ -159,7 +173,10 @@ internal sealed class CodexAppServerClient : ICodexClient
         {
             throw new InvalidDataException("Codex thread/start did not return thread.id.");
         }
-        return id.GetString()!;
+        var threadId = id.GetString()!;
+        threadMcpStatus.TryAdd(threadId, new McpConnectionInfo(false, "worlddata", 0, "WorldData MCP is starting."));
+        mcpReadiness.TryAdd(threadId, NewMcpReadiness());
+        return threadId;
     }
 
     public async Task<ThreadSnapshot> ResumeThreadAsync(ResumeThreadOptions options, CancellationToken cancellationToken)
@@ -177,7 +194,8 @@ internal sealed class CodexAppServerClient : ICodexClient
 
         var result = await SendRequestAsync("thread/resume", parameters, cancellationToken).ConfigureAwait(false);
         var snapshot = ParseThreadResponse(result, "thread/resume");
-        threadMcpStatus[options.ThreadId] = new McpConnectionInfo(true, "worlddata", 0, null);
+        threadMcpStatus.TryAdd(options.ThreadId, new McpConnectionInfo(false, "worlddata", 0, "WorldData MCP is starting."));
+        mcpReadiness.TryAdd(options.ThreadId, NewMcpReadiness());
         return snapshot;
     }
 
@@ -288,6 +306,22 @@ internal sealed class CodexAppServerClient : ICodexClient
             ?? new McpConnectionInfo(false, "worlddata", 0, "WorldData MCP did not report thread startup status.");
     }
 
+    public async Task<McpConnectionInfo> WaitForMcpReadyAsync(string threadId, CancellationToken cancellationToken)
+    {
+        if (threadMcpStatus.TryGetValue(threadId, out var existing) && existing.Connected) return existing;
+        var readiness = mcpReadiness.GetOrAdd(threadId, _ => NewMcpReadiness());
+        try
+        {
+            return await readiness.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            var timeout = new McpConnectionInfo(false, "worlddata", 0, "WorldData MCP startup timed out after 15 seconds.");
+            threadMcpStatus[threadId] = timeout;
+            return timeout;
+        }
+    }
+
     private JsonObject CreateThreadConfig()
         => new()
         {
@@ -298,7 +332,7 @@ internal sealed class CodexAppServerClient : ICodexClient
                     ["url"] = startOptions!.McpUrl,
                     ["env_http_headers"] = new JsonObject
                     {
-                        ["X-WorldData-MCP-Token"] = AgentHostProtocol.McpTokenEnvironmentVariable
+                        ["X-WorldData-MCP-Token"] = McpTokenEnvironmentVariable
                     },
                     ["required"] = true,
                     ["startup_timeout_sec"] = 15,
@@ -399,6 +433,9 @@ internal sealed class CodexAppServerClient : ICodexClient
                 return true;
             case "fileChange":
                 parsed = new ConversationItem(id, turnId, "tool", "tool", "File changes", type, ReadValue(item, "status"));
+                return true;
+            case "reasoning":
+                parsed = new ConversationItem(id, turnId, "activity", "assistant", "正在处理", "reasoning", ReadValue(item, "status"));
                 return true;
             default:
                 return false;
@@ -593,11 +630,14 @@ internal sealed class CodexAppServerClient : ICodexClient
             var error = GetString("error");
             if (name == "worlddata" && !string.IsNullOrWhiteSpace(threadId))
             {
-                threadMcpStatus[threadId] = new McpConnectionInfo(
+                var connection = new McpConnectionInfo(
                     status == "ready",
                     name,
                     0,
                     status == "ready" ? null : error ?? $"WorldData MCP startup state is '{status}'.");
+                threadMcpStatus[threadId] = connection;
+                var readiness = mcpReadiness.GetOrAdd(threadId, _ => NewMcpReadiness());
+                if (connection.Connected || !string.Equals(status, "starting", StringComparison.OrdinalIgnoreCase)) readiness.TrySetResult(connection);
             }
             return EmitAsync(new CodexEvent(
                 "mcp.status",
@@ -605,7 +645,9 @@ internal sealed class CodexAppServerClient : ICodexClient
                 Text: status,
                 ToolName: name,
                 ErrorCode: error,
-                Detail: parameters));
+                Detail: parameters,
+                McpConnected: status == "ready",
+                McpToolCount: 0));
         }
 
         return method switch
@@ -645,6 +687,15 @@ internal sealed class CodexAppServerClient : ICodexClient
         var toolName = itemType == "mcpToolCall"
             ? string.Join('.', new[] { server, tool }.Where(value => !string.IsNullOrWhiteSpace(value)))
             : itemType;
+        var (kind, role) = itemType switch
+        {
+            "mcpToolCall" or "commandExecution" or "fileChange" => ("tool", "tool"),
+            "userMessage" => ("message", "user"),
+            "agentMessage" => ("message", "assistant"),
+            "reasoning" => ("activity", "assistant"),
+            _ => ("activity", "assistant")
+        };
+        var status = ReadValue(item, "status");
         return EmitAsync(new CodexEvent(
             type,
             ThreadId: ReadString(parameters, "threadId"),
@@ -652,15 +703,36 @@ internal sealed class CodexAppServerClient : ICodexClient
             ItemId: ReadString(item, "id"),
             Text: ItemDisplayText(item, itemType),
             ToolName: toolName,
-            Detail: parameters));
+            Detail: parameters,
+            ItemKind: kind,
+            ItemRole: role,
+            ItemStatus: string.IsNullOrWhiteSpace(status) ? (type == "item.completed" ? "completed" : "running") : status));
     }
 
     private static string? ItemDisplayText(JsonElement item, string? itemType) => itemType switch
     {
         "commandExecution" => ReadString(item, "command"),
         "fileChange" => "File changes",
+        "reasoning" => "正在处理",
         _ => ReadString(item, "text") ?? ReadValue(item, "status")
     };
+
+    private static TaskCompletionSource<McpConnectionInfo> NewMcpReadiness()
+        => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private void OnCodexExited()
+    {
+        if (lifetime.IsCancellationRequested) return;
+        foreach (var completion in pending.Values)
+        {
+            completion.TrySetException(new IOException("Codex app-server exited unexpectedly."));
+        }
+        _ = EmitAsync(new CodexEvent(
+            "codex.exited",
+            Text: "Codex app-server exited unexpectedly.",
+            ErrorCode: "codex.exited",
+            Retryable: true));
+    }
 
     private static string? ReadNestedId(JsonElement value, string objectName)
     {
@@ -771,6 +843,8 @@ internal sealed class CodexAppServerClient : ICodexClient
         if (stdoutTask is not null) await IgnoreCancellation(stdoutTask).ConfigureAwait(false);
         if (stderrTask is not null) await IgnoreCancellation(stderrTask).ConfigureAwait(false);
         process?.Dispose();
+        childProcessJob?.Dispose();
+        childProcessJob = null;
         writeLock.Dispose();
         lifetime.Dispose();
     }

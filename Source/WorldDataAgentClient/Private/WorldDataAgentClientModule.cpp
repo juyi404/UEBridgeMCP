@@ -15,8 +15,7 @@
 
 namespace
 {
-	constexpr int32 MaxHostFrameCharacters = 1024 * 1024;
-	const FString AgentMcpTokenEnvironmentVariable = TEXT("WORLDDATA_MCP_TOKEN");
+	constexpr int32 MaxHostFrameBytes = WorldDataAgentProtocol::MaximumFrameBytes;
 
 	FString SerializeJson(const TSharedRef<FJsonObject>& Object)
 	{
@@ -161,21 +160,17 @@ namespace
 			});
 			if (!Process->Launch(
 				Options.AgentHostExecutable,
-				Options.ProjectRoot,
-				AgentMcpTokenEnvironmentVariable,
-				McpToken))
+				Options.ProjectRoot))
 			{
 				Process.Reset();
 				Fail(TEXT("agent_host.launch_failed"), TEXT("Could not launch WorldData Agent Host."), true);
 				return;
 			}
 
-			TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
-			Payload->SetStringField(TEXT("codexExecutable"), Options.CodexExecutable);
-			Payload->SetStringField(TEXT("projectRoot"), Options.ProjectRoot);
-			Payload->SetStringField(TEXT("mcpUrl"), Options.McpUrl);
-			Payload->SetStringField(TEXT("clientVersion"), TEXT("0.3.0"));
-			SendCommand(TEXT("connect"), Payload, TEXT("connect"));
+			// v2 negotiates from host.started before the private credential is sent.
+			// This keeps a mismatched Host from ever receiving a usable MCP token.
+			PendingMcpToken = McpToken;
+			bAwaitingHostHandshake = true;
 		}
 
 		virtual void Disconnect() override
@@ -220,6 +215,13 @@ namespace
 			if (!Request.ApprovalPolicy.IsEmpty()) Payload->SetStringField(TEXT("approvalPolicy"), Request.ApprovalPolicy);
 			if (!Request.SandboxMode.IsEmpty()) Payload->SetStringField(TEXT("sandboxMode"), Request.SandboxMode);
 			return SendCommand(TEXT("resumeThread"), Payload);
+		}
+
+		virtual FString ReadThread(const FWorldDataReadThreadRequest& Request) override
+		{
+			TSharedRef<FJsonObject> Payload = MakeShared<FJsonObject>();
+			Payload->SetStringField(TEXT("threadId"), Request.ThreadId);
+			return SendCommand(TEXT("readThread"), Payload);
 		}
 
 		virtual FString SendTurn(const FWorldDataSendTurnRequest& Request) override
@@ -272,9 +274,10 @@ namespace
 			Command->SetStringField(TEXT("type"), Type);
 			Command->SetObjectField(TEXT("payload"), Payload);
 			const FString Json = SerializeJson(Command);
-			if (Json.Len() > MaxHostFrameCharacters)
+			const FTCHARToUTF8 Utf8Json(*Json);
+			if (Utf8Json.Length() > WorldDataAgentProtocol::MaximumOutboundPayloadBytes)
 			{
-				Fail(TEXT("host.frame_too_large"), TEXT("Agent Host command exceeds the configured limit."), false);
+				Fail(TEXT("host.frame_too_large"), TEXT("Agent Host command exceeds the configured UTF-8 byte limit."), false);
 				return FString();
 			}
 			if (!Process->SendJsonLine(Json))
@@ -287,7 +290,7 @@ namespace
 
 		void ConsumeOutput(const TArray<uint8>& Output)
 		{
-			if (Output.Num() > MaxHostFrameCharacters || StdoutBuffer.Num() + Output.Num() > MaxHostFrameCharacters * 2)
+			if (Output.Num() > MaxHostFrameBytes || StdoutBuffer.Num() + Output.Num() > MaxHostFrameBytes * 2)
 			{
 				Fail(TEXT("host.output_overflow"), TEXT("Agent Host output exceeded the bounded buffer."), false);
 				return;
@@ -337,10 +340,20 @@ namespace
 			Message->TryGetStringField(TEXT("type"), Type);
 			FString RequestId;
 			Message->TryGetStringField(TEXT("requestId"), RequestId);
+			FString SessionId;
+			Message->TryGetStringField(TEXT("sessionId"), SessionId);
+			double Sequence = 0.0;
+			Message->TryGetNumberField(TEXT("sequence"), Sequence);
 			const TSharedPtr<FJsonObject> Payload = ObjectField(Message, TEXT("payload"));
 			if (Type == TEXT("host.started"))
 			{
-				SetStatus(EWorldDataAgentConnectionState::StartingCodex, TEXT("Agent Host started; connecting to Codex app-server."));
+				HandleHostStarted(Payload);
+				return;
+			}
+			if (Type == TEXT("codex.exited"))
+			{
+				Fail(TEXT("codex.exited"), TEXT("Codex app-server exited unexpectedly; recovering once."), true);
+				if (Process.IsValid()) Process->RequestStop(true);
 				return;
 			}
 			if (Type == TEXT("connect.completed"))
@@ -358,7 +371,34 @@ namespace
 				HandleError(RequestId, Payload);
 				return;
 			}
-			HandleAgentEvent(Type, RequestId, Payload);
+			HandleAgentEvent(Type, RequestId, SessionId, static_cast<int64>(Sequence), Payload);
+		}
+
+		void HandleHostStarted(const TSharedPtr<FJsonObject>& Payload)
+		{
+			double MinimumVersion = 0.0;
+			double MaximumVersion = 0.0;
+			if (!Payload.IsValid()
+				|| !Payload->TryGetNumberField(TEXT("minimumProtocolVersion"), MinimumVersion)
+				|| !Payload->TryGetNumberField(TEXT("maximumProtocolVersion"), MaximumVersion)
+				|| WorldDataAgentProtocol::CurrentVersion < static_cast<int32>(MinimumVersion)
+				|| WorldDataAgentProtocol::CurrentVersion > static_cast<int32>(MaximumVersion))
+			{
+				Fail(TEXT("host.protocol_mismatch"), TEXT("Agent Host does not support IPC protocol v2."), false);
+				if (Process.IsValid()) Process->RequestStop(true);
+				return;
+			}
+			if (!bAwaitingHostHandshake || PendingMcpToken.IsEmpty()) return;
+			TSharedRef<FJsonObject> ConnectPayload = MakeShared<FJsonObject>();
+			ConnectPayload->SetStringField(TEXT("codexExecutable"), ConnectionOptions.CodexExecutable);
+			ConnectPayload->SetStringField(TEXT("projectRoot"), ConnectionOptions.ProjectRoot);
+			ConnectPayload->SetStringField(TEXT("mcpUrl"), ConnectionOptions.McpUrl);
+			ConnectPayload->SetStringField(TEXT("mcpToken"), PendingMcpToken);
+			ConnectPayload->SetStringField(TEXT("clientVersion"), TEXT("0.4.0"));
+			PendingMcpToken.Empty();
+			bAwaitingHostHandshake = false;
+			SetStatus(EWorldDataAgentConnectionState::StartingCodex, TEXT("Agent Host v2 started; connecting to Codex app-server."));
+			SendCommand(TEXT("connect"), ConnectPayload, TEXT("connect"));
 		}
 
 		void HandleConnected(const TSharedPtr<FJsonObject>& Payload)
@@ -392,12 +432,22 @@ namespace
 				}
 			}
 			UpdateStatus(Next);
+			RecoveryAttempts = 0;
+			if (!RecoveryThreadId.IsEmpty())
+			{
+				FWorldDataReadThreadRequest RecoveryRequest;
+				RecoveryRequest.ThreadId = RecoveryThreadId;
+				RecoveryThreadId.Empty();
+				ReadThread(RecoveryRequest);
+			}
 		}
 
-		void HandleAgentEvent(const FString& Type, const FString& RequestId, const TSharedPtr<FJsonObject>& Payload)
+		void HandleAgentEvent(const FString& Type, const FString& RequestId, const FString& SessionId, const int64 Sequence, const TSharedPtr<FJsonObject>& Payload)
 		{
 			FWorldDataAgentEvent Event;
 			Event.RequestId = RequestId;
+			Event.SessionId = SessionId;
+			Event.Sequence = Sequence;
 			if (Payload.IsValid())
 			{
 				Payload->TryGetStringField(TEXT("threadId"), Event.ThreadId);
@@ -405,6 +455,9 @@ namespace
 				Payload->TryGetStringField(TEXT("itemId"), Event.ItemId);
 				Payload->TryGetStringField(TEXT("text"), Event.Text);
 				Payload->TryGetStringField(TEXT("toolName"), Event.ToolName);
+				Payload->TryGetStringField(TEXT("itemKind"), Event.ItemKind);
+				Payload->TryGetStringField(TEXT("itemRole"), Event.ItemRole);
+				Payload->TryGetStringField(TEXT("itemStatus"), Event.ItemStatus);
 				if (Event.RequestId.IsEmpty()) Payload->TryGetStringField(TEXT("requestId"), Event.RequestId);
 			}
 			if (Type == TEXT("threads.listed"))
@@ -435,6 +488,11 @@ namespace
 					Next.ActiveThreadId = Event.ThreadId;
 					const TSharedPtr<FJsonObject> Mcp = ObjectField(Payload, TEXT("mcp"));
 					Next.bMcpConnected = Mcp.IsValid() && Mcp->GetBoolField(TEXT("connected"));
+					if (Mcp.IsValid())
+					{
+						double ToolCount = 0.0;
+						if (Mcp->TryGetNumberField(TEXT("toolCount"), ToolCount)) Next.McpToolCount = static_cast<int32>(ToolCount);
+					}
 					Next.State = Next.bMcpConnected ? EWorldDataAgentConnectionState::Ready : EWorldDataAgentConnectionState::Degraded;
 					Next.StatusText = Next.bMcpConnected ? TEXT("Codex thread resumed with WorldData MCP.") : TEXT("WorldData MCP was not restored for the resumed thread.");
 					if (Next.bMcpConnected) Next.Error = FWorldDataAgentError();
@@ -449,6 +507,12 @@ namespace
 				Next.ActiveThreadId = Event.ThreadId;
 				const TSharedPtr<FJsonObject> Mcp = ObjectField(Payload, TEXT("mcp"));
 				Next.bMcpConnected = Mcp.IsValid() && Mcp->GetBoolField(TEXT("connected"));
+				if (Mcp.IsValid())
+				{
+					double ToolCount = 0.0;
+					Mcp->TryGetNumberField(TEXT("toolCount"), ToolCount);
+					Next.McpToolCount = static_cast<int32>(ToolCount);
+				}
 				if (!Next.bMcpConnected)
 				{
 					FString McpError = TEXT("WorldData MCP did not become ready for the Codex thread.");
@@ -465,10 +529,36 @@ namespace
 				}
 				UpdateStatus(Next);
 			}
+			else if (Type == TEXT("mcp.status"))
+			{
+				Event.Type = EWorldDataAgentEventType::McpStatusChanged;
+				FWorldDataAgentStatusSnapshot Next = GetStatus();
+				bool bMcpConnected = false;
+				if (Payload.IsValid())
+				{
+					Payload->TryGetBoolField(TEXT("mcpConnected"), bMcpConnected);
+					Next.McpStatus = Event.Text;
+					double ToolCount = 0.0;
+					if (Payload->TryGetNumberField(TEXT("mcpToolCount"), ToolCount)) Next.McpToolCount = static_cast<int32>(ToolCount);
+				}
+				Next.bMcpConnected = bMcpConnected;
+				if (!bMcpConnected && !Next.ActiveThreadId.IsEmpty()) Next.State = EWorldDataAgentConnectionState::Degraded;
+				UpdateStatus(Next);
+			}
 			else if (Type == TEXT("turn.accepted") || Type == TEXT("turn.started")) Event.Type = EWorldDataAgentEventType::TurnStarted;
 			else if (Type == TEXT("message.delta")) Event.Type = EWorldDataAgentEventType::MessageDelta;
-			else if (Type == TEXT("item.started")) Event.Type = EWorldDataAgentEventType::ToolStarted;
-			else if (Type == TEXT("item.completed")) Event.Type = EWorldDataAgentEventType::ToolCompleted;
+			else if (Type == TEXT("item.started"))
+			{
+				if (Event.ItemKind == TEXT("tool")) Event.Type = EWorldDataAgentEventType::ToolStarted;
+				else if (Event.ItemKind == TEXT("activity")) Event.Type = EWorldDataAgentEventType::ReasoningStarted;
+				else return;
+			}
+			else if (Type == TEXT("item.completed"))
+			{
+				if (Event.ItemKind == TEXT("tool")) Event.Type = EWorldDataAgentEventType::ToolCompleted;
+				else if (Event.ItemKind == TEXT("activity")) Event.Type = EWorldDataAgentEventType::ReasoningCompleted;
+				else return;
+			}
 			else if (Type == TEXT("approval.requested")) Event.Type = EWorldDataAgentEventType::ApprovalRequested;
 			else if (Type == TEXT("turn.completed")) Event.Type = EWorldDataAgentEventType::TurnCompleted;
 			else return;
@@ -541,6 +631,7 @@ namespace
 
 		void HandleProcessCompleted(const int32 ReturnCode, const bool bCancelled)
 		{
+			const FString PreviousActiveThreadId = GetStatus().ActiveThreadId;
 			Process.Reset();
 			StdoutBuffer.Empty();
 			if (bIntentionalShutdown)
@@ -553,6 +644,13 @@ namespace
 			FString DiagnosticPath;
 			FString DiagnosticError;
 			Diagnostics.ExportRedacted(DiagnosticPath, DiagnosticError);
+			if (RecoveryAttempts < 1 && !ConnectionOptions.AgentHostExecutable.IsEmpty())
+			{
+				++RecoveryAttempts;
+				RecoveryThreadId = PreviousActiveThreadId;
+				SetStatus(EWorldDataAgentConnectionState::Degraded, TEXT("Agent Host exited; attempting one automatic recovery."));
+				Connect(ConnectionOptions);
+			}
 		}
 
 		void DisconnectProcessForReconnect()
@@ -562,6 +660,8 @@ namespace
 			Process.Reset();
 			StdoutBuffer.Empty();
 			bIntentionalShutdown = false;
+			bAwaitingHostHandshake = false;
+			PendingMcpToken.Empty();
 		}
 
 		IWorldDataAgentSecurity& Security;
@@ -573,6 +673,10 @@ namespace
 		FWorldDataAgentStatusSnapshot Status;
 		FWorldDataAgentEventDelegate EventDelegate;
 		bool bIntentionalShutdown = false;
+		bool bAwaitingHostHandshake = false;
+		int32 RecoveryAttempts = 0;
+		FString PendingMcpToken;
+		FString RecoveryThreadId;
 		uint64 ProcessGeneration = 0;
 	};
 }

@@ -4,10 +4,9 @@ namespace WorldData.AgentHost.Contracts;
 
 public static class AgentHostProtocol
 {
-    public const int CurrentVersion = 1;
-    public const int MinimumVersion = 1;
+    public const int CurrentVersion = 2;
+    public const int MinimumVersion = 2;
     public const int MaximumFrameBytes = 1024 * 1024;
-    public const string McpTokenEnvironmentVariable = "WORLDDATA_MCP_TOKEN";
     public const string ThreadSource = "worlddata-unreal-agent";
 }
 
@@ -21,12 +20,15 @@ public sealed record HostEventEnvelope(
     int ProtocolVersion,
     string Type,
     string? RequestId,
-    object? Payload);
+    object? Payload,
+    string? SessionId = null,
+    long Sequence = 0);
 
 public sealed record CodexStartOptions(
     string Executable,
     string ProjectRoot,
     string McpUrl,
+    string McpToken,
     string ClientVersion);
 
 public sealed record CodexConnectionInfo(
@@ -103,7 +105,12 @@ public sealed record CodexEvent(
     string? RequestId = null,
     string? ErrorCode = null,
     bool Retryable = false,
-    JsonElement? Detail = null);
+    JsonElement? Detail = null,
+    string? ItemKind = null,
+    string? ItemRole = null,
+    string? ItemStatus = null,
+    bool? McpConnected = null,
+    int? McpToolCount = null);
 
 public interface IHostEventSink
 {
@@ -123,6 +130,7 @@ public interface ICodexClient : IAsyncDisposable
     Task InterruptTurnAsync(string threadId, string turnId, CancellationToken cancellationToken);
     Task ResolveApprovalAsync(ApprovalDecision decision, CancellationToken cancellationToken);
     Task<McpConnectionInfo> GetMcpStatusAsync(string threadId, CancellationToken cancellationToken);
+    Task<McpConnectionInfo> WaitForMcpReadyAsync(string threadId, CancellationToken cancellationToken);
 }
 
 public interface ICodexModule

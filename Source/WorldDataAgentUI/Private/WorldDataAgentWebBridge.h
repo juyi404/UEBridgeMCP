@@ -72,5 +72,7 @@ private:
 	FString SelectedModel;
 	FString UiErrorCode;
 	FString UiErrorMessage;
+	FString LastHostSessionId;
+	int64 LastHostSequence = 0;
 	bool bConfiguring = false;
 };

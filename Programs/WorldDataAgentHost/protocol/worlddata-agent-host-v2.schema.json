@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://worlddata.local/schemas/agent-host-v2.json",
+  "title": "WorldData Agent Host IPC v2",
+  "oneOf": [
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "commandType": {
+      "enum": ["connect", "createThread", "listThreads", "resumeThread", "readThread", "sendTurn", "interruptTurn", "resolveApproval", "shutdown"]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "id", "type", "payload"],
+      "properties": {
+        "protocolVersion": { "const": 2 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "$ref": "#/$defs/commandType" },
+        "payload": { "type": "object" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "type", "sessionId", "sequence"],
+      "properties": {
+        "protocolVersion": { "const": 2 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "requestId": { "type": ["string", "null"], "maxLength": 128 },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "payload": { "type": ["object", "null"] }
+      }
+    }
+  }
+}

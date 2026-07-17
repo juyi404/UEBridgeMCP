@@ -12,6 +12,8 @@
 #include "Serialization/JsonWriter.h"
 #include "WorldDataMCPToolRegistry.h"
 
+#include <UEBridgeMCPCoreModule.h>
+
 namespace
 {
 	FString ConnectionStateName(const EWorldDataAgentConnectionState State)
@@ -105,9 +107,10 @@ FString UWorldDataAgentWebBridge::GetState()
 	const FWorldDataAgentStatusSnapshot Status = Subsystem.GetGateway().GetStatus();
 	const FWorldDataAgentRuntimeStatus Runtime = Subsystem.GetRuntimeStatus();
 	const FConversationSession* ActiveSession = FindSession(ActiveThreadId);
+	const int32 RegisteredToolCount = WorldDataMCP::FToolRegistry::Get().GetRegisteredToolMetadata().Num();
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-	Root->SetNumberField(TEXT("schemaVersion"), 1);
+	Root->SetNumberField(TEXT("schemaVersion"), 2);
 	Root->SetBoolField(TEXT("configuring"), bConfiguring);
 	Root->SetBoolField(TEXT("busy"), ActiveSession && ActiveSession->IsBusy());
 	Root->SetStringField(TEXT("activeThreadId"), ActiveThreadId);
@@ -118,6 +121,8 @@ FString UWorldDataAgentWebBridge::GetState()
 	Connection->SetStringField(TEXT("statusText"), Status.StatusText);
 	Connection->SetBoolField(TEXT("authenticated"), Status.bAuthenticated);
 	Connection->SetBoolField(TEXT("mcpConnected"), Status.bMcpConnected);
+	Connection->SetNumberField(TEXT("mcpToolCount"), Status.bMcpConnected ? RegisteredToolCount : Status.McpToolCount);
+	Connection->SetStringField(TEXT("mcpStatus"), Status.McpStatus);
 	Connection->SetStringField(TEXT("hostVersion"), Status.AgentHostVersion);
 	Connection->SetStringField(TEXT("codexVersion"), Status.CodexVersion);
 	TArray<TSharedPtr<FJsonValue>> Models;
@@ -175,14 +180,40 @@ FString UWorldDataAgentWebBridge::GetState()
 	Root->SetArrayField(TEXT("conversation"), ConversationValues);
 
 	TSharedRef<FJsonObject> Approval = MakeShared<FJsonObject>();
-	const FWorldDataAgentEvent EmptyApproval;
-	const FWorldDataAgentEvent& PendingApproval = ActiveSession ? ActiveSession->PendingApproval : EmptyApproval;
-	Approval->SetBoolField(TEXT("pending"), PendingApproval.Type == EWorldDataAgentEventType::ApprovalRequested);
-	Approval->SetStringField(TEXT("requestId"), PendingApproval.RequestId);
-	Approval->SetStringField(TEXT("threadId"), PendingApproval.ThreadId);
-	Approval->SetStringField(TEXT("turnId"), PendingApproval.TurnId);
-	Approval->SetStringField(TEXT("text"), PendingApproval.Text);
-	Approval->SetStringField(TEXT("toolName"), PendingApproval.ToolName);
+	const TArray<FWorldDataMCPApprovalSummary> McpApprovals =
+		IUEBridgeMCPCoreModule::Get().GetService().GetPendingApprovals();
+	const FWorldDataMCPApprovalSummary* McpApproval = McpApprovals.FindByPredicate(
+		[](const FWorldDataMCPApprovalSummary& Candidate)
+		{
+			return Candidate.bReadyForDecision;
+		});
+	if (McpApproval)
+	{
+		// Prefix Core approval ids so ResolveApproval can distinguish them from
+		// Agent Host approval request ids without changing the web UI contract.
+		Approval->SetBoolField(TEXT("pending"), true);
+		Approval->SetStringField(TEXT("requestId"), TEXT("mcp:") + McpApproval->ApprovalId);
+		Approval->SetStringField(TEXT("threadId"), FString());
+		Approval->SetStringField(TEXT("turnId"), FString());
+		Approval->SetStringField(TEXT("text"), FString::Printf(
+			TEXT("Risk: %s\nTarget: %s\nApproval: %s\nExpires: %s"),
+			*McpApproval->Risk,
+			*McpApproval->TargetSummary,
+			*McpApproval->ApprovalId,
+			*McpApproval->ExpiresAtUtc.ToIso8601()));
+		Approval->SetStringField(TEXT("toolName"), McpApproval->ToolName);
+	}
+	else
+	{
+		const FWorldDataAgentEvent EmptyApproval;
+		const FWorldDataAgentEvent& PendingApproval = ActiveSession ? ActiveSession->PendingApproval : EmptyApproval;
+		Approval->SetBoolField(TEXT("pending"), PendingApproval.Type == EWorldDataAgentEventType::ApprovalRequested);
+		Approval->SetStringField(TEXT("requestId"), PendingApproval.RequestId);
+		Approval->SetStringField(TEXT("threadId"), PendingApproval.ThreadId);
+		Approval->SetStringField(TEXT("turnId"), PendingApproval.TurnId);
+		Approval->SetStringField(TEXT("text"), PendingApproval.Text);
+		Approval->SetStringField(TEXT("toolName"), PendingApproval.ToolName);
+	}
 	Root->SetObjectField(TEXT("approval"), Approval);
 
 	TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
@@ -294,6 +325,11 @@ bool UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FStrin
 		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current conversation operation to finish before sending another message."));
 		return false;
 	}
+	if (!Session.bDraft && !IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().GetStatus().bMcpConnected)
+	{
+		SetUiError(TEXT("mcp.not_ready"), TEXT("WorldData MCP is not ready for this thread yet."));
+		return false;
+	}
 	Session.ErrorCode.Empty();
 	Session.ErrorMessage.Empty();
 
@@ -324,6 +360,23 @@ bool UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FStrin
 
 void UWorldDataAgentWebBridge::ResolveApproval(const FString& RequestId, const bool bApproved)
 {
+	static const FString McpApprovalPrefix(TEXT("mcp:"));
+	if (RequestId.StartsWith(McpApprovalPrefix))
+	{
+		const FString ApprovalId = RequestId.RightChop(McpApprovalPrefix.Len());
+		FString Error;
+		if (!IUEBridgeMCPCoreModule::Get().GetService().ResolvePendingApproval(ApprovalId, bApproved, Error))
+		{
+			SetUiError(TEXT("mcp.approval_resolution_failed"), Error);
+		}
+		else
+		{
+			UiErrorCode.Empty();
+			UiErrorMessage.Empty();
+		}
+		return;
+	}
+
 	FConversationSession* Session = nullptr;
 	for (TPair<FString, FConversationSession>& Pair : ConversationSessions)
 	{
@@ -346,10 +399,27 @@ void UWorldDataAgentWebBridge::ResolveApproval(const FString& RequestId, const b
 
 void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Event)
 {
+	if (!Event.SessionId.IsEmpty())
+	{
+		if (Event.SessionId == LastHostSessionId && Event.Sequence <= LastHostSequence) return;
+		LastHostSessionId = Event.SessionId;
+		LastHostSequence = Event.Sequence;
+	}
 	switch (Event.Type)
 	{
 	case EWorldDataAgentEventType::ConnectionChanged:
 		if (Event.Status.State == EWorldDataAgentConnectionState::Ready && Threads.IsEmpty()) RefreshThreads();
+		if (Event.Status.State == EWorldDataAgentConnectionState::Degraded)
+		{
+			for (TPair<FString, FConversationSession>& Pair : ConversationSessions)
+			{
+				if (!Pair.Value.bTurnActive) continue;
+				Pair.Value.bTurnActive = false;
+				Pair.Value.ActiveTurnId.Empty();
+				Pair.Value.ErrorCode = TEXT("turn.interrupted");
+				Pair.Value.ErrorMessage = TEXT("The Agent Host restarted. The unfinished turn was not resent.");
+			}
+		}
 		break;
 	case EWorldDataAgentEventType::ThreadsListed:
 	{
@@ -386,6 +456,12 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 		Session->bCreating = false;
 		Session->bDraft = false;
 		Session->bLoaded = true;
+		if (!IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().GetStatus().bMcpConnected)
+		{
+			Session->ErrorCode = TEXT("mcp.not_ready");
+			Session->ErrorMessage = TEXT("The thread was created, but WorldData MCP is not ready yet.");
+			break;
+		}
 		if (!Session->PendingFirstMessage.IsEmpty())
 		{
 			const FString Message = MoveTemp(Session->PendingFirstMessage);
@@ -457,6 +533,40 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 		Existing->Status = Event.Type == EWorldDataAgentEventType::ToolCompleted ? TEXT("completed") : TEXT("running");
 		break;
 	}
+	case EWorldDataAgentEventType::ReasoningStarted:
+	case EWorldDataAgentEventType::ReasoningCompleted:
+	{
+		FConversationSession* Session = FindSession(Event.ThreadId);
+		if (!Session) break;
+		FWorldDataConversationItem* Existing = Session->Items.FindByPredicate([&Event](const FWorldDataConversationItem& Item)
+		{
+			return !Event.ItemId.IsEmpty() && Item.Id == Event.ItemId;
+		});
+		if (!Existing)
+		{
+			FWorldDataConversationItem Item;
+			Item.Id = Event.ItemId;
+			Item.TurnId = Event.TurnId;
+			Item.Kind = TEXT("activity");
+			Item.Role = TEXT("assistant");
+			Item.ToolName = TEXT("reasoning");
+			Item.Text = TEXT("正在处理");
+			Session->Items.Add(MoveTemp(Item));
+			Existing = &Session->Items.Last();
+		}
+		Existing->Status = Event.Type == EWorldDataAgentEventType::ReasoningCompleted ? TEXT("completed") : TEXT("running");
+		break;
+	}
+	case EWorldDataAgentEventType::McpStatusChanged:
+		if (!Event.ThreadId.IsEmpty() && !IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().GetStatus().bMcpConnected)
+		{
+			if (FConversationSession* Session = FindSession(Event.ThreadId))
+			{
+				Session->ErrorCode = TEXT("mcp.not_ready");
+				Session->ErrorMessage = TEXT("WorldData MCP is not ready for this thread.");
+			}
+		}
+		break;
 	case EWorldDataAgentEventType::ApprovalRequested:
 		if (FConversationSession* Session = FindSession(Event.ThreadId)) Session->PendingApproval = Event;
 		break;

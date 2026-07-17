@@ -148,6 +148,38 @@ bool FUEBridgeMCPContextPreconditionTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FUEBridgeMCPLegacyToolGovernanceTest,
+	"UEBridgeMCP.Contract.LegacyToolGovernance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEBridgeMCPLegacyToolGovernanceTest::RunTest(const FString& Parameters)
+{
+	constexpr const TCHAR* LegacyProvider = TEXT("UEBridgeMCPLegacyToolGroups");
+	int32 LegacyToolCount = 0;
+	TSet<FString> Names;
+	for (const WorldDataMCP::FToolMetadata& Metadata : WorldDataMCP::FToolRegistry::Get().GetRegisteredToolMetadata())
+	{
+		if (Metadata.ProviderName != LegacyProvider) continue;
+		++LegacyToolCount;
+		TestTrue(FString::Printf(TEXT("legacy tool '%s' is marked audited"), *Metadata.Name), Metadata.bAudited);
+		TestTrue(FString::Printf(TEXT("legacy tool '%s' has a unique name"), *Metadata.Name), !Names.Contains(Metadata.Name));
+		Names.Add(Metadata.Name);
+		if (Metadata.Risk == WorldDataMCP::EToolRisk::ReadOnly)
+		{
+			TestFalse(FString::Printf(TEXT("read-only legacy tool '%s' does not request approval"), *Metadata.Name), Metadata.bRequiresInteractiveApproval);
+			TestTrue(FString::Printf(TEXT("read-only legacy tool '%s' has no revision requirement"), *Metadata.Name), Metadata.RevisionPolicy == WorldDataMCP::EToolRevisionPolicy::None);
+		}
+		else
+		{
+			TestTrue(FString::Printf(TEXT("mutating legacy tool '%s' requests approval"), *Metadata.Name), Metadata.bRequiresInteractiveApproval);
+			TestTrue(FString::Printf(TEXT("mutating legacy tool '%s' requires fresh context"), *Metadata.Name), Metadata.RevisionPolicy == WorldDataMCP::EToolRevisionPolicy::RequireFreshContext);
+		}
+	}
+	TestTrue(TEXT("legacy tool catalog is registered before contract tests run"), LegacyToolCount > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FUEBridgeMCPRegistryCallbackIsolationTest,
 	"UEBridgeMCP.Registry.CallbackIsolation",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

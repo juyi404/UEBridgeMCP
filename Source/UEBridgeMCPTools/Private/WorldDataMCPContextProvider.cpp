@@ -2,8 +2,8 @@
 
 #include "WorldDataMCPToolRegistry.h"
 
-#include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
+#include "Containers/StringConv.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -18,7 +18,8 @@ namespace
 	{
 		const FTCHARToUTF8 Utf8(*Value);
 		// Revisions are optimistic-concurrency tokens, not security primitives.
-		// Use the portable CRC implementation instead of a platform hash hook.
+		// FPlatformMisc::GetSHA256Signature is not implemented by every UE target
+		// (including this UE 5.8 Windows build) and asserts when invoked.
 		return FString::Printf(TEXT("crc32-%08x-%d"), FCrc::MemCrc32(Utf8.Get(), Utf8.Length()), Utf8.Length());
 	}
 

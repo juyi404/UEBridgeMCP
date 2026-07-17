@@ -4,8 +4,12 @@
 
 namespace WorldDataAgentProtocol
 {
-	inline constexpr int32 CurrentVersion = 1;
-	inline constexpr int32 MinimumVersion = 1;
+	inline constexpr int32 CurrentVersion = 2;
+	inline constexpr int32 MinimumVersion = 2;
+	// JSONL frames are UTF-8 byte streams. Keep one byte for the line terminator
+	// so the UE client stays strictly below the Agent Host's 1 MiB payload limit.
+	inline constexpr int32 MaximumFrameBytes = 1024 * 1024;
+	inline constexpr int32 MaximumOutboundPayloadBytes = MaximumFrameBytes - 1;
 }
 
 enum class EWorldDataAgentConnectionState : uint8
@@ -34,6 +38,9 @@ enum class EWorldDataAgentEventType : uint8
 	MessageDelta,
 	ToolStarted,
 	ToolCompleted,
+	ReasoningStarted,
+	ReasoningCompleted,
+	McpStatusChanged,
 	ApprovalRequested,
 	TurnCompleted,
 	TurnFailed
@@ -102,6 +109,8 @@ struct FWorldDataAgentStatusSnapshot
 	TArray<FWorldDataAgentModel> Models;
 	bool bAuthenticated = false;
 	bool bMcpConnected = false;
+	int32 McpToolCount = 0;
+	FString McpStatus;
 	FWorldDataAgentError Error;
 };
 
@@ -128,6 +137,11 @@ struct FWorldDataResumeThreadRequest
 	FString Model;
 	FString ApprovalPolicy;
 	FString SandboxMode;
+};
+
+struct FWorldDataReadThreadRequest
+{
+	FString ThreadId;
 };
 
 struct FWorldDataThreadSummary
@@ -178,6 +192,11 @@ struct FWorldDataAgentEvent
 	FString ItemId;
 	FString Text;
 	FString ToolName;
+	FString ItemKind;
+	FString ItemRole;
+	FString ItemStatus;
+	FString SessionId;
+	int64 Sequence = 0;
 	FString NextCursor;
 	FWorldDataThreadSummary Thread;
 	TArray<FWorldDataThreadSummary> Threads;

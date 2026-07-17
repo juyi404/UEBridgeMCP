@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using WorldData.AgentHost.Contracts;
 
 namespace WorldData.AgentHost.App;
@@ -10,24 +12,37 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = false
     };
 
     private readonly ICodexClient codex = codexModule.CreateClient();
+    private readonly object operationLock = new();
+    private readonly Dictionary<string, Task<string>> createOperations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<string>> turnOperations = new(StringComparer.Ordinal);
     private IHostEventSink? sink;
     private bool connected;
 
     public async Task<int> RunAsync(Stream input, Stream output, CancellationToken cancellationToken)
     {
-        sink = new JsonLineEventSink(output, JsonOptions);
+        const string capabilities = "sequenced-events,item-semantics,mcp-readiness,operation-dedup";
+        sink = new JsonLineEventSink(output, JsonOptions, Guid.NewGuid().ToString("N"));
         codex.EventReceived += ForwardCodexEventAsync;
-        using var reader = new StreamReader(input, new UTF8Encoding(false), false, 16 * 1024, leaveOpen: true);
+        var reader = new BoundedJsonLineReader(input, AgentHostProtocol.MaximumFrameBytes);
 
         await sink.WriteAsync(new HostEventEnvelope(
             AgentHostProtocol.CurrentVersion,
             "host.started",
             null,
-            new { hostVersion = typeof(AgentHostApplication).Assembly.GetName().Version?.ToString() ?? "1.0.0" }), cancellationToken);
+            new
+            {
+                hostVersion = typeof(AgentHostApplication).Assembly.GetName().Version?.ToString() ?? "2.0.0",
+                minimumProtocolVersion = AgentHostProtocol.MinimumVersion,
+                maximumProtocolVersion = AgentHostProtocol.CurrentVersion,
+                capabilities = capabilities.Split(',', StringSplitOptions.RemoveEmptyEntries)
+            }), cancellationToken);
+
+        var pendingCommands = new List<Task>();
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -40,13 +55,13 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
             {
                 break;
             }
-            if (line is null) break;
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            if (Encoding.UTF8.GetByteCount(line) > AgentHostProtocol.MaximumFrameBytes)
+            catch (FrameTooLargeException)
             {
                 await WriteErrorAsync(null, "host.frame_too_large", "IPC frame exceeds the 1 MiB limit.", false, cancellationToken);
                 continue;
             }
+            if (line is null) break;
+            if (string.IsNullOrWhiteSpace(line)) continue;
 
             HostCommandEnvelope? command;
             try
@@ -58,7 +73,8 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                 await WriteErrorAsync(null, "host.invalid_json", "IPC command is not valid JSON.", false, cancellationToken);
                 continue;
             }
-            if (command is null || string.IsNullOrWhiteSpace(command.Id) || string.IsNullOrWhiteSpace(command.Type))
+            if (command is null || string.IsNullOrWhiteSpace(command.Id) || string.IsNullOrWhiteSpace(command.Type)
+                || command.Id.Length > 128 || command.Type.Length > 128 || command.Payload.ValueKind != JsonValueKind.Object)
             {
                 await WriteErrorAsync(command?.Id, "host.invalid_command", "IPC command requires id and type.", false, cancellationToken);
                 continue;
@@ -69,16 +85,31 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                 continue;
             }
 
-            try
+            if (string.Equals(command.Type, "shutdown", StringComparison.Ordinal))
             {
-                if (await HandleCommandAsync(command, cancellationToken).ConfigureAwait(false)) break;
+                await ExecuteCommandAsync(command, cancellationToken).ConfigureAwait(false);
+                break;
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                await WriteErrorAsync(command.Id, ErrorCode(exception), SafeMessage(exception), IsRetryable(exception), cancellationToken);
-            }
+
+            // Codex JSON-RPC is multiplexed. Do not let a slow history read or
+            // MCP startup wait block interruption or approval decisions.
+            pendingCommands.Add(ExecuteCommandAsync(command, cancellationToken));
+            pendingCommands.RemoveAll(task => task.IsCompleted);
         }
+        if (pendingCommands.Count > 0) await Task.WhenAll(pendingCommands).ConfigureAwait(false);
         return 0;
+    }
+
+    private async Task ExecuteCommandAsync(HostCommandEnvelope command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await HandleCommandAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await WriteErrorAsync(command.Id, ErrorCode(exception), SafeMessage(exception), IsRetryable(exception), cancellationToken);
+        }
     }
 
     private async Task<bool> HandleCommandAsync(HostCommandEnvelope command, CancellationToken cancellationToken)
@@ -93,6 +124,7 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                     Require(request.CodexExecutable, "codexExecutable"),
                     Require(request.ProjectRoot, "projectRoot"),
                     Require(request.McpUrl, "mcpUrl"),
+                    ResolveMcpToken(request.McpToken),
                     Require(request.ClientVersion, "clientVersion")), cancellationToken);
                 connected = true;
                 await WriteResultAsync(command.Id, "connect.completed", new
@@ -110,18 +142,15 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                 EnsureConnected();
                 var request = command.Payload.Deserialize<CreateThreadRequest>(JsonOptions)
                     ?? throw new InvalidDataException("createThread payload is required.");
-                var threadId = await codex.CreateThreadAsync(new CreateThreadOptions(
-                    Require(request.ClientConversationId, "clientConversationId"),
+                var clientConversationId = Require(request.ClientConversationId, "clientConversationId");
+                var threadId = await StartOperationOnceAsync(createOperations, clientConversationId, () => codex.CreateThreadAsync(new CreateThreadOptions(
+                    clientConversationId,
                     Require(request.WorkingDirectory, "workingDirectory"),
                     request.Model,
                     request.ApprovalPolicy,
                     request.SandboxMode,
-                    request.Ephemeral), cancellationToken);
-                // The injected server is marked required=true. Codex therefore
-                // fails thread/start if it cannot initialize this MCP server.
-                // mcpServerStatus/list is process-global and does not enumerate
-                // thread-local overrides, so it must not be used as readiness.
-                var mcpStatus = new McpConnectionInfo(true, "worlddata", 0, null);
+                    request.Ephemeral), cancellationToken)).ConfigureAwait(false);
+                var mcpStatus = await codex.WaitForMcpReadyAsync(threadId, cancellationToken).ConfigureAwait(false);
                 await WriteResultAsync(command.Id, "thread.created", new { threadId, mcp = mcpStatus }, cancellationToken);
                 return false;
             }
@@ -149,12 +178,13 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                     request.Model,
                     request.ApprovalPolicy,
                     request.SandboxMode), cancellationToken);
+                var mcpStatus = await codex.WaitForMcpReadyAsync(snapshot.Thread.Id, cancellationToken).ConfigureAwait(false);
                 await WriteResultAsync(command.Id, "thread.resumed", new
                 {
                     threadId = snapshot.Thread.Id,
                     thread = snapshot.Thread,
                     items = snapshot.Items,
-                    mcp = new McpConnectionInfo(true, "worlddata", 0, null)
+                    mcp = mcpStatus
                 }, cancellationToken);
                 return false;
             }
@@ -177,10 +207,12 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
                 EnsureConnected();
                 var request = command.Payload.Deserialize<SendTurnRequest>(JsonOptions)
                     ?? throw new InvalidDataException("sendTurn payload is required.");
-                var turnId = await codex.StartTurnAsync(new TurnOptions(
-                    Require(request.ThreadId, "threadId"),
-                    Require(request.ClientTurnId, "clientTurnId"),
-                    Require(request.Text, "text")), cancellationToken);
+                var threadId = Require(request.ThreadId, "threadId");
+                var clientTurnId = Require(request.ClientTurnId, "clientTurnId");
+                var turnId = await StartOperationOnceAsync(turnOperations, $"{threadId}:{clientTurnId}", () => codex.StartTurnAsync(new TurnOptions(
+                    threadId,
+                    clientTurnId,
+                    Require(request.Text, "text")), cancellationToken)).ConfigureAwait(false);
                 await WriteResultAsync(command.Id, "turn.accepted", new { request.ThreadId, turnId }, cancellationToken);
                 return false;
             }
@@ -228,7 +260,12 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
             value.RequestId,
             value.ErrorCode,
             value.Retryable,
-            value.Detail
+            value.Detail,
+            value.ItemKind,
+            value.ItemRole,
+            value.ItemStatus,
+            value.McpConnected,
+            value.McpToolCount
         };
         return sink.WriteAsync(new HostEventEnvelope(AgentHostProtocol.CurrentVersion, value.Type, null, payload), CancellationToken.None);
     }
@@ -248,6 +285,16 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
     private void EnsureConnected()
     {
         if (!connected) throw new HostNotConnectedException();
+    }
+
+    private static string ResolveMcpToken(string? suppliedToken)
+    {
+        if (!string.IsNullOrWhiteSpace(suppliedToken)) return suppliedToken;
+
+        // Compatibility for an already-built UE client during the protocol v1
+        // migration. Current clients provide this through their private stdio
+        // channel; the Host never writes or changes the parent environment.
+        return Require(Environment.GetEnvironmentVariable("WORLDDATA_MCP_TOKEN"), "mcpToken");
     }
 
     private static string Require(string? value, string fieldName)
@@ -284,6 +331,28 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
         return message;
     }
 
+    private Task<string> StartOperationOnceAsync(
+        Dictionary<string, Task<string>> operations,
+        string key,
+        Func<Task<string>> start)
+    {
+        lock (operationLock)
+        {
+            if (operations.TryGetValue(key, out var existing)) return existing;
+            var operation = start();
+            operations[key] = operation;
+            _ = operation.ContinueWith(_ =>
+            {
+                if (!operation.IsFaulted && !operation.IsCanceled) return;
+                lock (operationLock)
+                {
+                    if (operations.TryGetValue(key, out var candidate) && ReferenceEquals(candidate, operation)) operations.Remove(key);
+                }
+            }, TaskScheduler.Default);
+            return operation;
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         codex.EventReceived -= ForwardCodexEventAsync;
@@ -294,6 +363,7 @@ internal sealed class AgentHostApplication(ICodexModule codexModule) : IAgentHos
         string CodexExecutable,
         string ProjectRoot,
         string McpUrl,
+        string? McpToken,
         string ClientVersion);
 
     private sealed record CreateThreadRequest(

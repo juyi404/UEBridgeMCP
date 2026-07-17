@@ -339,7 +339,7 @@ namespace
 		FString ArgsJson;
 		TSharedRef<FToolJob, ESPMode::ThreadSafe> Job;
 		FString TargetSummary;
-		FString ChangeSummaryHash;
+		FString ChangeSummaryFingerprint;
 		FString TargetRevision;
 		FDateTime CreatedAtUtc;
 		FDateTime ExpiresAtUtc;
@@ -363,10 +363,29 @@ namespace
 		}
 	}
 
-	static FString MakeNonSecretHash(const FString& Value)
+	static FString MakeArgumentShapeFingerprint(const TSharedPtr<FJsonObject>& Arguments)
+	{
+		TArray<FString> Shape;
+		if (Arguments.IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Arguments->Values)
+			{
+				const int32 Type = Pair.Value.IsValid() ? static_cast<int32>(Pair.Value->Type) : -1;
+				Shape.Add(FString::Printf(TEXT("%s:%d"), *Pair.Key, Type));
+			}
+		}
+		Shape.Sort();
+		const FString ShapeText = FString::Join(Shape, TEXT("|"));
+		const FTCHARToUTF8 Utf8(*ShapeText);
+		return FString::Printf(TEXT("shape-crc32-%08x-%d"), FCrc::MemCrc32(Utf8.Get(), Utf8.Length()), Utf8.Length());
+	}
+
+	static FString MakeTargetRevisionFingerprint(const FString& Value)
 	{
 		const FTCHARToUTF8 Utf8(*Value);
-		// This detects stale approval targets; it is not a security credential.
+		// This value detects stale approval targets; it is never used as a
+		// security credential. Use UE's portable CRC implementation because the
+		// platform SHA-256 hook is absent in some editor targets.
 		return FString::Printf(TEXT("crc32-%08x-%d"), FCrc::MemCrc32(Utf8.Get(), Utf8.Length()), Utf8.Length());
 	}
 
@@ -420,7 +439,7 @@ namespace
 		{
 			return Revision;
 		}
-		return MakeNonSecretHash(MakeApprovalTargetSummary(Arguments) + TEXT("|") + GetCachedWorldRevision());
+		return MakeTargetRevisionFingerprint(MakeApprovalTargetSummary(Arguments) + TEXT("|") + GetCachedWorldRevision());
 	}
 
 	static void CompleteToolJob(const TSharedRef<FToolJob, ESPMode::ThreadSafe>& Job, const FString& ResultJson)
@@ -883,10 +902,12 @@ namespace
 		const TSharedRef<FPendingToolApproval, ESPMode::ThreadSafe> Approval =
 			MakeShared<FPendingToolApproval, ESPMode::ThreadSafe>(Invocation, ExecutionArgsJson, Job);
 		Approval->TargetSummary = MakeApprovalTargetSummary(Arguments);
-		Approval->ChangeSummaryHash = MakeNonSecretHash(ExecutionArgsJson);
+		// This is intentionally a names-and-types fingerprint, never a hash of
+		// argument values. Audit data must not enable offline guesses of secrets.
+		Approval->ChangeSummaryFingerprint = MakeArgumentShapeFingerprint(ExecutionArguments);
 		Job->ApprovalId = Approval->ApprovalId;
 		Approval->Invocation.ApprovalId = Approval->ApprovalId;
-		Approval->Invocation.ChangeSummaryHash = Approval->ChangeSummaryHash;
+		Approval->Invocation.ChangeSummaryFingerprint = Approval->ChangeSummaryFingerprint;
 
 		{
 			FScopeLock Lock(&GMcpApprovalMutex);
@@ -2142,7 +2163,7 @@ TArray<FWorldDataMCPApprovalSummary> FWorldDataMCPServer::GetPendingApprovals()
 			Summary.ToolName = Approval->Invocation.ToolName;
 			Summary.Risk = WorldDataMCP::ToolGovernance::GetRiskName(Approval->Invocation.Risk);
 			Summary.TargetSummary = Approval->TargetSummary;
-			Summary.ChangeSummaryHash = Approval->ChangeSummaryHash;
+			Summary.ChangeSummaryFingerprint = Approval->ChangeSummaryFingerprint;
 			Summary.TargetRevision = Approval->TargetRevision;
 			Summary.OwnerSessionId = Approval->Invocation.Caller.SessionId;
 			Summary.CreatedAtUtc = Approval->CreatedAtUtc;

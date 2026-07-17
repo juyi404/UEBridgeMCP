@@ -4,9 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(testsDirectory, "../../..");
-const standaloneWebRoot = resolve(projectRoot, "Resources/Web");
-const embeddedWebRoot = resolve(projectRoot, "Plugins/UEBridgeMCP/Resources/Web");
-const webRoot = existsSync(standaloneWebRoot) ? standaloneWebRoot : embeddedWebRoot;
+const webRoot = resolve(projectRoot, "Plugins/UEBridgeMCP/Resources/Web");
 const html = readFileSync(resolve(webRoot, "index.html"), "utf8");
 const script = readFileSync(resolve(webRoot, "app.js"), "utf8");
 const layout = readFileSync(resolve(webRoot, "layout.css"), "utf8");
@@ -72,16 +70,21 @@ if (!/<link\s+rel=["']stylesheet["']\s+href=["']layout\.css["']/.test(html)
   failures.push("embedded layout must fill the Unreal viewport and keep messages independently scrollable");
 }
 if (!/function\s+conversationSignature\s*\(next\)[\s\S]*?item\.toolName[\s\S]*?item\.text/.test(script)
-    || !/function\s+renderToolMessage\s*\(item\)[\s\S]*?tool-status/.test(script)
+    || !/function\s+renderToolBatch\s*\(items\)[\s\S]*?tool-batch/.test(script)
+    || !/function\s+renderActivityBatch\s*\(items\)[\s\S]*?activity-batch/.test(script)
+    || !/while\s*\(index\s*<\s*items\.length\s*&&\s*items\[index\]\.kind\s*===\s*["']tool["']\)/.test(script)
+    || !/items\[index\]\.kind\s*===\s*["']activity["']/.test(script)
     || !/function\s+renderToolMessage\s*\(item\)[\s\S]*?tool-detail/.test(script)) {
-  failures.push("conversation rendering must react to complete displayed data and keep tool status separate from details");
+  failures.push("conversation rendering must compact tool events and render non-tool activity separately");
 }
 if (!/accepted\s*===\s*false[\s\S]*?await\s+poll\(\)/.test(script)
     || !/if\s*\(sent\)\s*elements\.messageInput\.value\s*=\s*["']{2}/.test(script)) {
   failures.push("the composer must retain its draft when the bridge rejects a send");
 }
-if (!/\.message--tool\s*\{[\s\S]*?width:\s*fit-content[\s\S]*?max-width:\s*min\(680px,\s*92%\)/.test(messageStyles)) {
-  failures.push("tool messages must size to their content instead of using a fixed wide card");
+if (!/\.tool-batch\s*\{[\s\S]*?width:\s*fit-content[\s\S]*?max-width:\s*min\(460px,\s*100%\)/.test(messageStyles)
+    || !/\.tool-batch__summary\s*\{[\s\S]*?min-height:\s*30px/.test(messageStyles)
+    || !/\.activity-batch\s*\{[\s\S]*?width:\s*fit-content/.test(messageStyles)) {
+  failures.push("tool batches must use a compact collapsed summary instead of wide individual cards");
 }
 if (!/@media\s*\(max-width:\s*820px\)[\s\S]*?height:\s*100%[\s\S]*?overflow:\s*hidden[\s\S]*?\.app\s*\{[\s\S]*?display:\s*grid[\s\S]*?grid-template-columns/.test(layout)) {
   failures.push("narrow embedded panels must retain a fixed work area instead of falling back to document scrolling");

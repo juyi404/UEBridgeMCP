@@ -6,12 +6,13 @@ if (!hostExecutable || !codexExecutable || !projectRoot) {
   process.exit(2);
 }
 
+const mcpToken = process.env.WORLDDATA_MCP_TOKEN ?? "protocol-probe-secret";
+const childEnvironment = { ...process.env };
+delete childEnvironment.WORLDDATA_MCP_TOKEN;
+
 const child = spawn(hostExecutable, [], {
   cwd: projectRoot,
-  env: {
-    ...process.env,
-    WORLDDATA_MCP_TOKEN: process.env.WORLDDATA_MCP_TOKEN ?? "protocol-probe-secret",
-  },
+  env: childEnvironment,
   stdio: ["pipe", "pipe", "pipe"],
   windowsHide: true,
 });
@@ -26,6 +27,8 @@ let stdout = "";
 let stderr = "";
 let finished = false;
 let timeout;
+let sessionId = "";
+let lastSequence = 0;
 
 function send(value) {
   child.stdin.write(`${JSON.stringify(value)}\n`);
@@ -47,6 +50,20 @@ child.stdout.on("data", (chunk) => {
     stdout = stdout.slice(newline + 1);
     if (!line) continue;
     const message = JSON.parse(line);
+    if (message.protocolVersion !== 2 || typeof message.sessionId !== "string" || message.sequence <= lastSequence) {
+      console.error("Agent Host v2 event envelope is invalid or out of order.");
+      child.kill();
+      finish(1);
+      return;
+    }
+    sessionId ||= message.sessionId;
+    if (sessionId !== message.sessionId) {
+      console.error("Agent Host changed session id during a process lifetime.");
+      child.kill();
+      finish(1);
+      return;
+    }
+    lastSequence = message.sequence;
     seen.push(message.type);
     if (message.type === "error") {
       console.error(JSON.stringify(message.payload));
@@ -54,7 +71,7 @@ child.stdout.on("data", (chunk) => {
       finish(1);
     }
     if (message.type === "connect.completed") {
-      send({ protocolVersion: 1, id: "list-threads", type: "listThreads", payload: { limit: 10 } });
+      send({ protocolVersion: 2, id: "list-threads", type: "listThreads", payload: { limit: 10 } });
     }
     if (message.type === "threads.listed") {
       const threads = Array.isArray(message.payload?.threads) ? message.payload.threads : [];
@@ -81,7 +98,7 @@ child.stdout.on("data", (chunk) => {
         finish(1);
         return;
       }
-      send({ protocolVersion: 1, id: "shutdown", type: "shutdown", payload: {} });
+      send({ protocolVersion: 2, id: "shutdown", type: "shutdown", payload: {} });
     }
   }
 });
@@ -104,13 +121,14 @@ child.on("exit", (code) => {
 });
 
 send({
-  protocolVersion: 1,
+  protocolVersion: 2,
   id: "connect",
   type: "connect",
   payload: {
     codexExecutable,
     projectRoot,
     mcpUrl,
+    mcpToken,
     clientVersion: "0.3.0",
   },
 });

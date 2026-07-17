@@ -4,7 +4,7 @@ using WorldData.AgentHost.Contracts;
 
 namespace WorldData.AgentHost.App;
 
-internal sealed class JsonLineEventSink(Stream output, JsonSerializerOptions options) : IHostEventSink
+internal sealed class JsonLineEventSink(Stream output, JsonSerializerOptions options, string sessionId) : IHostEventSink
 {
     private readonly SemaphoreSlim writeLock = new(1, 1);
     private readonly StreamWriter writer = new(output, new UTF8Encoding(false), 16 * 1024, leaveOpen: true)
@@ -12,10 +12,17 @@ internal sealed class JsonLineEventSink(Stream output, JsonSerializerOptions opt
         AutoFlush = false,
         NewLine = "\n"
     };
+    private long sequence;
 
     public async ValueTask WriteAsync(HostEventEnvelope message, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(message, options);
+        var sequenced = message with
+        {
+            ProtocolVersion = AgentHostProtocol.CurrentVersion,
+            SessionId = sessionId,
+            Sequence = Interlocked.Increment(ref sequence)
+        };
+        var json = JsonSerializer.Serialize(sequenced, options);
         if (Encoding.UTF8.GetByteCount(json) > AgentHostProtocol.MaximumFrameBytes)
         {
             throw new InvalidDataException("IPC event exceeds the 1 MiB limit.");

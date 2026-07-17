@@ -103,7 +103,7 @@ namespace WorldDataMCP::ToolGovernance
 			if (!Invocation.ApprovalId.IsEmpty())
 			{
 				Record->SetStringField(TEXT("approvalId"), Invocation.ApprovalId);
-				Record->SetStringField(TEXT("changeSummaryHash"), Invocation.ChangeSummaryHash);
+				Record->SetStringField(TEXT("changeSummaryFingerprint"), Invocation.ChangeSummaryFingerprint);
 				Record->SetStringField(TEXT("targetRevision"), Invocation.TargetRevision);
 			}
 

@@ -23,7 +23,7 @@ struct UEBRIDGEMCPCORE_API FWorldDataMCPApprovalSummary
 	FString ToolName;
 	FString Risk;
 	FString TargetSummary;
-	FString ChangeSummaryHash;
+	FString ChangeSummaryFingerprint;
 	FString TargetRevision;
 	FString OwnerSessionId;
 	FDateTime CreatedAtUtc;

@@ -1,18 +1,8 @@
 #include "WorldDataAgentHostProcess.h"
 
-#include "HAL/PlatformMisc.h"
 #include "HAL/RunnableThread.h"
-#include "Misc/ScopeLock.h"
 #include "Containers/StringConv.h"
-
-namespace
-{
-	FCriticalSection& ChildEnvironmentMutex()
-	{
-		static FCriticalSection Mutex;
-		return Mutex;
-	}
-}
+#include "WorldDataAgentTypes.h"
 
 FWorldDataAgentHostProcess::FWorldDataAgentHostProcess() = default;
 
@@ -30,9 +20,7 @@ FWorldDataAgentHostProcess::~FWorldDataAgentHostProcess()
 
 bool FWorldDataAgentHostProcess::Launch(
 	const FString& Executable,
-	const FString& WorkingDirectory,
-	const FString& SecretEnvironmentVariable,
-	const FString& SecretValue)
+	const FString& WorkingDirectory)
 {
 	if (bRunning.Load() || ProcessHandle.IsValid()) return false;
 
@@ -50,28 +38,18 @@ bool FWorldDataAgentHostProcess::Launch(
 		return false;
 	}
 
-	{
-		// CreateProc inherits the current environment. Serialize the very small
-		// launch window and restore the editor environment immediately afterwards.
-		FScopeLock EnvironmentLock(&ChildEnvironmentMutex());
-		const FString PreviousValue = FPlatformMisc::GetEnvironmentVariable(*SecretEnvironmentVariable);
-		FPlatformMisc::SetEnvironmentVar(*SecretEnvironmentVariable, *SecretValue);
-		ProcessHandle = FPlatformProcess::CreateProc(
-			*Executable,
-			TEXT(""),
-			false,
-			true,
-			true,
-			nullptr,
-			0,
-			WorkingDirectory.IsEmpty() ? nullptr : *WorkingDirectory,
-			StdoutWriteChild,
-			StdinReadChild,
-			StderrWriteChild);
-		FPlatformMisc::SetEnvironmentVar(
-			*SecretEnvironmentVariable,
-			PreviousValue.IsEmpty() ? nullptr : *PreviousValue);
-	}
+	ProcessHandle = FPlatformProcess::CreateProc(
+		*Executable,
+		TEXT(""),
+		false,
+		true,
+		true,
+		nullptr,
+		0,
+		WorkingDirectory.IsEmpty() ? nullptr : *WorkingDirectory,
+		StdoutWriteChild,
+		StdinReadChild,
+		StderrWriteChild);
 
 	// The parent must not retain the inheritable child ends.
 	FPlatformProcess::ClosePipe(nullptr, StdoutWriteChild);
@@ -102,6 +80,7 @@ bool FWorldDataAgentHostProcess::SendJsonLine(const FString& Json)
 {
 	if (!bRunning.Load() || Json.IsEmpty()) return false;
 	FTCHARToUTF8 Converted(*Json);
+	if (Converted.Length() > WorldDataAgentProtocol::MaximumOutboundPayloadBytes) return false;
 	TArray<uint8> Frame;
 	Frame.Reserve(Converted.Length() + 1);
 	Frame.Append(reinterpret_cast<const uint8*>(Converted.Get()), Converted.Length());
