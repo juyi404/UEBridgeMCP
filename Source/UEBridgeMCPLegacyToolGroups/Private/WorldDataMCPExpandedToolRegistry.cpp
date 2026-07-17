@@ -1,3 +1,4 @@
+#include "WorldDataMCPCommon.h"
 #include "WorldDataMCPToolRegistry.h"
 
 #include "WorldDataMCPAIAnimTools.h"
@@ -149,7 +150,7 @@ namespace WorldDataMCP::LegacyToolGroups
 					FString Result;
 					if (!Dispatcher(Name, Arguments, Result))
 					{
-						return ErrorJson(FString::Printf(TEXT("Legacy MCP tool '%s' did not handle the request."), *Name));
+						return WorldDataMCP::ErrorJson(FString::Printf(TEXT("Legacy MCP tool '%s' did not handle the request."), *Name));
 					}
 					return Result;
 				};
