@@ -1,9 +1,61 @@
-.message {
-  white-space: normal;
+.hidden {
+  display: none !important;
 }
 
-.message-body {
+.message {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.message-body,
+.message__body {
   white-space: pre-wrap;
+}
+
+.message__body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-state {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #d39a2d;
+  box-shadow: 0 0 0 3px rgba(211, 154, 45, .1);
+}
+
+.message--tool.completed .tool-state {
+  background: var(--success);
+  box-shadow: 0 0 0 3px rgba(56, 132, 92, .1);
+}
+
+.conversation-empty {
+  padding: 18px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.empty-state strong {
+  color: #8190a7;
+  font-size: 16px;
+  font-weight: 680;
+}
+
+.empty-state span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .message-markdown {
@@ -69,4 +121,138 @@
   color: inherit;
   font-size: 12px;
   white-space: pre;
+}
+
+.attachment-button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.context-select--static {
+  cursor: default;
+}
+
+.context-select--static:hover {
+  border-color: #e0e8f5;
+  background: #f8faff;
+  color: var(--text-soft);
+}
+
+.model-select {
+  gap: 3px;
+  padding-right: 5px;
+}
+
+.model-select select {
+  min-width: 0;
+  max-width: 190px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.permission-card__text {
+  max-height: 112px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.runtime-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid #dce8ff;
+  border-radius: 10px;
+  background: #f7faff;
+}
+
+.runtime-config-row > div {
+  min-width: 0;
+}
+
+.runtime-config-row strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.runtime-config-row p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.runtime-grid,
+.security-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.runtime-item {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #e6ecf5;
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+.runtime-item span,
+.runtime-item code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-item span {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.runtime-item code {
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+}
+
+.security-grid .security-option {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e8edf5;
+  border-radius: 9px;
+  background: var(--surface-soft);
+}
+
+@media (max-width: 760px) {
+  .runtime-config-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtime-grid,
+  .security-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .model-select select {
+    max-width: 130px;
+  }
 }

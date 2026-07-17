@@ -2,77 +2,149 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f9fd">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'">
-  <title>WorldData Agent</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>WorldData Codex 控制台</title>
+  <link rel="stylesheet" href="console.css">
+  <link rel="stylesheet" href="layout.css">
   <link rel="stylesheet" href="message.css">
 </head>
 <body>
-  <div id="app" class="shell">
-    <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">WD</span><span>Unlimited.AI</span></div>
-      <button id="new-chat" class="primary-action"><span>＋</span> 新建会话</button>
-      <nav class="nav" aria-label="主导航">
-        <button id="nav-chat" class="nav-item active" data-route="chat"><span>○</span>聊天</button>
-        <button id="nav-settings" class="nav-item" data-route="settings"><span>⚙</span>设置</button>
-      </nav>
-      <div class="history-head"><span>聊天记录</span><span id="thread-count">0 个会话</span></div>
-      <div id="thread-list" class="thread-list"></div>
-    </aside>
-
-    <main class="main">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">WORLDDATA / CODEX</div>
-          <h1 id="page-title">Codex 会话</h1>
-          <div id="connection-line" class="connection-line"><span class="dot"></span><span>正在读取服务状态…</span></div>
-        </div>
-        <div class="toolbar">
-          <button id="refresh" class="button">刷新会话</button>
-          <button id="top-settings" class="button">设置</button>
-          <span id="ready-pill" class="pill neutral">初始化中</span>
+  <main class="app" aria-label="WorldData Codex 控制台">
+    <aside class="sidebar" aria-label="会话列表">
+      <header class="sidebar__header">
+        <div class="brand" aria-label="WorldData">
+          <div class="brand__identity">
+            <span class="brand__mark" aria-hidden="true">WD</span>
+            <span class="brand__name">Unlimited.AI</span>
+          </div>
+          <span class="brand__chevron" aria-hidden="true">⌄</span>
         </div>
       </header>
 
-      <section id="chat-view" class="view chat-view">
-        <div class="environment-banner">
-          <span class="banner-icon">C</span>
-          <div><strong>本地交互环境</strong><p>消息、工具调用和审批均通过 Agent Host 协议同步，不依赖界面识别。</p></div>
+      <div class="sidebar__body">
+        <nav class="sidebar__actions" aria-label="会话功能">
+          <button id="new-chat" class="sidebar-action" type="button">
+            <span class="sidebar-action__icon" aria-hidden="true">＋</span>
+            新建会话
+          </button>
+          <button id="nav-settings" class="sidebar-action" type="button" data-route="settings">
+            <span class="sidebar-action__icon sidebar-action__icon--settings" aria-hidden="true">⚙</span>
+            设置
+          </button>
+          <button id="nav-chat" class="sidebar-action" type="button" data-route="chat" aria-current="page">
+            <span class="sidebar-action__icon" aria-hidden="true">◌</span>
+            聊天
+          </button>
+        </nav>
+
+        <section class="sidebar__history" aria-label="聊天记录">
+          <div class="section-row history-heading">
+            <p class="section-label">聊天记录</p>
+            <span id="thread-count" class="section-count">0 个会话</span>
+          </div>
+          <div class="section-row history-day">
+            <p class="section-label">今天</p>
+          </div>
+          <nav id="thread-list" class="conversation-list" aria-label="当前项目的聊天记录"></nav>
+        </section>
+
+        <div class="sidebar__profile">
+          <span class="profile__avatar" aria-hidden="true">C</span>
+          <span class="profile__name">Codex app-server</span>
+          <span class="profile__more" aria-label="WorldData MCP 本地连接" title="WorldData MCP 本地连接">•••</span>
         </div>
-        <div id="chat-error" class="error-card hidden"></div>
-        <div id="message-list" class="message-list">
-          <div class="empty-state"><strong>今天我能帮您做什么？</strong><span>连接完成后，可直接操作当前 Unreal 项目。</span></div>
+      </div>
+    </aside>
+
+    <section class="content" aria-live="polite">
+      <header class="content__topbar">
+        <div class="conversation-title">
+          <div class="conversation-title__text">
+            <p class="eyebrow">WORLDDATA / CODEX</p>
+            <h1 id="page-title" class="content__heading">Codex 会话</h1>
+            <span id="connection-line" class="top-server-connection">正在读取服务状态…</span>
+          </div>
         </div>
-        <form id="composer" class="composer">
-          <textarea id="message-input" rows="3" placeholder="输入消息…（Enter 发送，Shift + Enter 换行）"></textarea>
-          <div class="composer-footer">
-            <div class="composer-options">
-              <span class="chip">WorldData MCP</span>
-              <label class="model-label">模型
-                <select id="model-select"></select>
-              </label>
+        <div class="topbar-actions" aria-label="面板操作">
+          <button id="refresh" class="button button--quiet" type="button">刷新会话</button>
+          <button id="top-settings" class="button button--quiet" type="button">设置</button>
+          <span id="ready-pill" class="status" role="status">初始化中</span>
+        </div>
+      </header>
+
+      <div class="content__body">
+        <section id="chat-view" class="view">
+          <div class="notice" role="status">
+            <span class="notice__icon" aria-hidden="true">C</span>
+            <div>
+              <span class="notice__label">本地交互环境</span>
+              <span class="notice__text">消息、工具调用与审批通过 Agent Host 协议同步，直接读取 Codex 和 WorldData MCP 的结构化数据。</span>
             </div>
-            <button id="send" class="send-button" type="submit">发送</button>
+          </div>
+
+          <div id="chat-error" class="message message--error hidden" role="alert"></div>
+
+          <div id="approval-modal" class="permission-card hidden" role="region" aria-live="assertive">
+            <span class="permission-card__icon" aria-hidden="true">!</span>
+            <div>
+              <p id="approval-title" class="permission-card__title">Codex 请求执行操作</p>
+              <pre id="approval-text" class="permission-card__text"></pre>
+            </div>
+            <div class="permission-card__actions">
+              <button id="deny" class="button button--danger" type="button">拒绝</button>
+              <button id="approve" class="button button--primary" type="button">允许本次</button>
+            </div>
+          </div>
+
+          <div id="message-list" class="messages" aria-label="会话消息">
+            <div class="empty-state">
+              <strong>今天我能帮您做什么？</strong>
+              <span>连接完成后，可直接操作当前 Unreal 项目。</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-view" class="view settings-view hidden">
+          <div class="view-heading">
+            <div>
+              <h2>设置</h2>
+              <p>管理 Codex 后端、WorldData MCP、安全连接与运行时校验。</p>
+            </div>
+            <button id="back-chat" class="button button--quiet" type="button">返回聊天</button>
+          </div>
+          <div id="settings-content" class="settings-grid"></div>
+        </section>
+      </div>
+
+      <footer id="composer-footer" class="content__footer">
+        <form id="composer" class="composer">
+          <textarea id="message-input" class="composer__input" rows="3" placeholder="输入消息…（Enter 发送，Shift + Enter 换行）" aria-label="输入给 Codex 的消息"></textarea>
+          <div class="composer__toolbar">
+            <span class="attachment-button" aria-hidden="true">＋</span>
+            <div class="composer__meta">
+              <div class="composer__context" aria-label="对话执行配置">
+                <span class="context-select context-select--static">
+                  <span class="context-select__label">协议</span>
+                  <span class="context-select__value">Agent Host v1</span>
+                </span>
+                <label class="context-select model-select">
+                  <span class="context-select__label">模型</span>
+                  <select id="model-select" aria-label="选择模型"></select>
+                </label>
+              </div>
+            </div>
+            <span id="composer-status" class="composer__run-status" aria-live="polite">本地安全连接</span>
+            <div class="composer__actions">
+              <button id="send" class="button button--primary button--send" type="submit" disabled>发送</button>
+            </div>
           </div>
         </form>
-      </section>
+      </footer>
+    </section>
+  </main>
 
-      <section id="settings-view" class="view settings-view hidden">
-        <div class="settings-heading"><div><h2>设置</h2><p>运行时只需配置一次；后续启动会自动校验并连接。</p></div><button id="back-chat" class="button">返回聊天</button></div>
-        <div id="settings-content" class="settings-content"></div>
-      </section>
-    </main>
-  </div>
-
-  <div id="approval-modal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-card">
-      <div class="modal-kicker">需要确认</div>
-      <h2 id="approval-title">Codex 请求执行操作</h2>
-      <pre id="approval-text"></pre>
-      <div class="modal-actions"><button id="deny" class="button danger">拒绝</button><button id="approve" class="send-button">允许本次</button></div>
-    </div>
-  </div>
   <script src="app.js"></script>
 </body>
 </html>

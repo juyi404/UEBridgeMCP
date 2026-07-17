@@ -11,7 +11,8 @@
     send: document.querySelector("#send"), settingsContent: document.querySelector("#settings-content"),
     approvalModal: document.querySelector("#approval-modal"), approvalTitle: document.querySelector("#approval-title"),
     approvalText: document.querySelector("#approval-text"), navChat: document.querySelector("#nav-chat"),
-    navSettings: document.querySelector("#nav-settings")
+    navSettings: document.querySelector("#nav-settings"), composerFooter: document.querySelector("#composer-footer"),
+    composerStatus: document.querySelector("#composer-status")
   });
 
   let route = "chat";
@@ -96,8 +97,9 @@
     const settings = route === "settings";
     elements.chatView.classList.toggle("hidden", settings);
     elements.settingsView.classList.toggle("hidden", !settings);
-    elements.navChat.classList.toggle("active", !settings);
-    elements.navSettings.classList.toggle("active", settings);
+    elements.composerFooter.classList.toggle("hidden", settings);
+    elements.navChat.setAttribute("aria-current", settings ? "false" : "page");
+    elements.navSettings.setAttribute("aria-current", settings ? "page" : "false");
     elements.pageTitle.textContent = settings ? "设置" : "Codex 会话";
     if (state) render(state);
   }
@@ -119,20 +121,23 @@
 
   function renderConnection(next) {
     const connection = next.connection;
-    elements.connectionLine.className = `connection-line ${connection.state === "ready" ? "ready" : (connection.state === "fatal" || connection.state === "degraded" ? "error" : "")}`;
-    elements.connectionLine.innerHTML = `<span class="dot"></span><span>${escapeHtml(connectionLabel(connection))}</span>`;
+    elements.connectionLine.className = `top-server-connection ${connection.state === "ready" ? "" : "is-offline"}`;
+    elements.connectionLine.textContent = connectionLabel(connection);
     const ready = connection.state === "ready";
     const failed = connection.state === "fatal" || connection.state === "degraded";
-    elements.readyPill.className = `pill ${ready ? "ready" : (failed ? "error" : "neutral")}`;
-    elements.readyPill.textContent = ready ? "● 已就绪" : (failed ? "● 需要处理" : "● 连接中");
+    elements.readyPill.className = `status ${failed ? "status--error" : (!ready ? "status--processing" : "")}`;
+    elements.readyPill.textContent = ready ? "已就绪" : (failed ? "需要处理" : "连接中");
+    elements.composerStatus.classList.toggle("is-offline", !ready);
+    elements.composerStatus.textContent = ready ? "Codex 与 MCP 已连接" : connectionLabel(connection);
   }
 
   function renderThreads(next) {
     elements.threadCount.textContent = `${next.threads.length} 个会话`;
     elements.threadList.innerHTML = next.threads.map(thread => {
       const title = thread.title || thread.preview || "新对话";
-      return `<button class="thread-item ${thread.id === next.activeThreadId ? "active" : ""}" data-thread-id="${escapeHtml(thread.id)}"><span class="thread-title">${escapeHtml(title)}</span><span class="thread-meta"><span>${escapeHtml(threadStatusLabel(thread.status))}</span><span>${relativeTime(thread.updatedAt)}</span></span></button>`;
-    }).join("") || `<div class="thread-meta" style="padding:12px">暂无本项目会话</div>`;
+      const status = threadStatusLabel(thread.status);
+      return `<button class="conversation" type="button" aria-current="${thread.id === next.activeThreadId ? "page" : "false"}" data-thread-id="${escapeHtml(thread.id)}" title="${escapeHtml(status || title)}"><span class="conversation__title">${escapeHtml(title)}</span><span class="conversation__age">${relativeTime(thread.updatedAt)}</span></button>`;
+    }).join("") || `<div class="conversation-empty">暂无本项目会话</div>`;
   }
 
   function renderModels(next) {
@@ -151,12 +156,12 @@
       return;
     }
     elements.messageList.innerHTML = next.conversation.map(item => {
-      if (item.kind === "tool") return `<div class="tool-card ${escapeHtml(item.status)}"><span class="tool-state"></span><strong>${escapeHtml(item.toolName || "工具调用")}</strong><span>${escapeHtml(item.status || item.text || "")}</span></div>`;
+      if (item.kind === "tool") return `<article class="message message--tool ${escapeHtml(item.status)}"><span class="message__role">TOOL · ${escapeHtml(item.toolName || "工具调用")}</span><div class="message__body"><span class="tool-state"></span>${escapeHtml(item.status || item.text || "")}</div></article>`;
       const role = item.role === "user" ? "user" : "assistant";
       const body = role === "user"
         ? `<div class="message-body">${escapeHtml(item.text)}</div>`
         : `<div class="message-markdown">${renderMarkdown(item.text)}</div>`;
-      return `<article class="message ${role}"><div class="message-label">${role === "user" ? "你" : "CODEX"}</div>${body}</article>`;
+      return `<article class="message message--${role}"><span class="message__role">${role === "user" ? "你" : "CODEX"}</span>${body}</article>`;
     }).join("");
     if (wasNearBottom) elements.messageList.scrollTop = elements.messageList.scrollHeight;
   }
@@ -166,18 +171,24 @@
     const connection = next.connection;
     const configured = runtime.configured && runtime.verified;
     elements.settingsContent.innerHTML = `
-      <article class="settings-card">
-        <div class="settings-card-head"><div><h3>Codex 后端运行时</h3><p>自动发现受支持的原生 Codex、复制到托管目录、生成协议 schema，并按 SHA-256 固定到当前项目。</p></div><span class="pill ${configured ? "ready" : "neutral"}">${configured ? "已配置" : "未配置"}</span></div>
-        <div class="status-box"><div class="status-copy"><strong>${configured ? "配置已保存，后续启动自动使用" : "点击一次即可完成发现、复制、校验与连接"}</strong><code>${escapeHtml(runtime.manifestPath || "尚未生成运行时清单")}</code></div><button id="configure-runtime" class="send-button" ${next.configuring ? "disabled" : ""}>${next.configuring ? "正在配置…" : (configured ? "重新校验配置" : "一键自动配置")}</button></div>
-        <div class="hash-grid"><div class="hash-cell"><span>Agent Host · ${escapeHtml(runtime.hostVersion || "待配置")}</span><code>${escapeHtml(runtime.hostSha256 || "—")}</code></div><div class="hash-cell"><span>Codex · ${escapeHtml(runtime.codexVersion || "待配置")}</span><code>${escapeHtml(runtime.codexSha256 || "—")}</code></div></div>
+      <article class="settings-card settings-card--wide">
+        <div class="settings-card__head"><div><h3 class="settings-card__title">Codex 后端运行时</h3><p class="settings-card__description">自动发现原生 Codex、复制到托管目录、生成协议 schema，并按 SHA-256 固定到当前项目。</p></div><span class="server-state ${configured ? "" : "is-stopped"}">${configured ? "已配置" : "未配置"}</span></div>
+        <div class="runtime-config-row"><div><strong>${configured ? "配置已保存，后续启动会自动使用" : "点击一次完成发现、复制、校验与连接"}</strong><p>${escapeHtml(runtime.manifestPath || "尚未生成运行时清单")}</p></div><button id="configure-runtime" class="button button--primary" type="button" ${next.configuring ? "disabled" : ""}>${next.configuring ? "正在配置…" : (configured ? "重新校验配置" : "一键自动配置")}</button></div>
+        <div class="runtime-grid"><div class="runtime-item"><span>Agent Host · ${escapeHtml(runtime.hostVersion || "待配置")}</span><code>${escapeHtml(runtime.hostSha256 || "—")}</code></div><div class="runtime-item"><span>Codex · ${escapeHtml(runtime.codexVersion || "待配置")}</span><code>${escapeHtml(runtime.codexSha256 || "—")}</code></div></div>
       </article>
       <article class="settings-card">
-        <div class="settings-card-head"><div><h3>WorldData MCP</h3><p>每个 Codex 线程自动注入本地 MCP 地址和临时认证头；密钥不会进入页面、配置文件或日志。</p></div><span class="pill ${connection.mcpConnected ? "ready" : "neutral"}">${connection.mcpConnected ? "线程已连接" : "等待会话"}</span></div>
-        <div class="status-box"><div class="status-copy"><strong>${escapeHtml(connectionLabel(connection))}</strong><code>Agent Host 协议 v1 · 本地 JSONL · 线程级 MCP</code></div><button id="refresh-settings" class="button">刷新状态</button></div>
+        <div class="settings-card__head"><div><h3 class="settings-card__title">WorldData MCP</h3><p class="settings-card__description">每个 Codex 线程自动注入本地服务和临时认证头。</p></div><span class="server-state ${connection.mcpConnected ? "" : "is-stopped"}">${connection.mcpConnected ? "线程已连接" : "等待会话"}</span></div>
+        <div class="client-banner"><span class="client-banner__mark">MCP</span><span>${escapeHtml(connectionLabel(connection))}</span></div>
+        <div class="settings-actions"><button id="refresh-settings" class="button button--quiet" type="button">刷新状态</button></div>
       </article>
       <article class="settings-card">
-        <div class="settings-card-head"><div><h3>账户与模型</h3><p>账户状态和模型列表直接来自 Codex app-server，不在面板中保存登录凭据或硬编码模型。</p></div><span class="pill ${connection.authenticated ? "ready" : "error"}">${connection.authenticated ? "已认证" : "需要登录 Codex"}</span></div>
-        <div class="status-box"><div class="status-copy"><strong>${(connection.models || []).length} 个可用模型</strong><code>${escapeHtml((connection.models || []).map(model => model.displayName || model.id).join(" · ") || "连接后读取")}</code></div></div>
+        <div class="settings-card__head"><div><h3 class="settings-card__title">账户与模型</h3><p class="settings-card__description">状态直接来自 Codex app-server，不保存登录凭据，也不硬编码模型。</p></div><span class="server-state ${connection.authenticated ? "" : "is-stopped"}">${connection.authenticated ? "已认证" : "需要登录"}</span></div>
+        <div class="security-option"><div class="security-option__copy"><span class="security-option__title">${(connection.models || []).length} 个可用模型</span><span class="security-option__help">连接后实时读取当前账户可用模型。</span></div></div>
+        <div class="chips">${(connection.models || []).map(model => `<span class="chip">${escapeHtml(model.displayName || model.id)}</span>`).join("") || `<span class="chip">等待连接</span>`}</div>
+      </article>
+      <article class="settings-card settings-card--wide">
+        <div class="settings-card__head"><div><h3 class="settings-card__title">安全连接</h3><p class="settings-card__description">浏览器只接收稳定状态 JSON；MCP 密钥仅存在于编辑器内存和受信任子进程环境。</p></div><span class="server-state">本地保护</span></div>
+        <div class="security-grid"><div class="security-option"><div class="security-option__copy"><span class="security-option__title">Agent Host IPC v1</span><span class="security-option__help">有界 JSONL 帧、协议版本校验和明确错误代码。</span></div><span class="chip">STDIO</span></div><div class="security-option"><div class="security-option__copy"><span class="security-option__title">线程级 MCP</span><span class="security-option__help">临时认证头不会进入 HTML、配置文件或诊断日志。</span></div><span class="chip">EPHEMERAL</span></div></div>
       </article>`;
     document.querySelector("#configure-runtime")?.addEventListener("click", () => invoke("configureruntime").catch(console.error));
     document.querySelector("#refresh-settings")?.addEventListener("click", () => invoke("refreshthreads").catch(console.error));
@@ -215,7 +226,8 @@
       state = next;
       render(next);
     } catch (error) {
-      elements.connectionLine.innerHTML = `<span class="dot"></span><span>正在等待 Unreal 接口…</span>`;
+      elements.connectionLine.className = "top-server-connection is-offline";
+      elements.connectionLine.textContent = "正在等待 Unreal 接口…";
     } finally { polling = false; }
   }
 
