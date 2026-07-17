@@ -1,8 +1,12 @@
 #include "SUEBridgeMCPWebPanel.h"
 
+#include "Async/Async.h"
 #include "UEBridgeMCPAgentController.h"
 #include "UEBridgeMCPCoreModule.h"
 #include "UEBridgeMCPStyle.h"
+#include "WorldDataAgentBackendFactory.h"
+#include "WorldDataCodexACPClient.h"
+#include "WorldDataCodexAcpBootstrap.h"
 #include "WorldDataCodexWebBridge.h"
 
 #include "Dom/JsonObject.h"
@@ -145,6 +149,13 @@ void SUEBridgeMCPWebPanel::CreateWebBridge()
 			Self->HandleSetPermissionMode(PermissionMode);
 		}
 	};
+	WebBridge->OnSetBackend = [WeakThis](const FString& BackendId)
+	{
+		if (const TSharedPtr<SUEBridgeMCPWebPanel> Self = WeakThis.Pin())
+		{
+			Self->HandleSetBackend(BackendId);
+		}
+	};
 	WebBridge->OnResolvePermission = [WeakThis](const bool bAllow)
 	{
 		if (const TSharedPtr<SUEBridgeMCPWebPanel> Self = WeakThis.Pin())
@@ -247,6 +258,8 @@ void SUEBridgeMCPWebPanel::PublishInitialState()
 	Payload->SetNumberField(TEXT("port"), Service.IsRunning() ? Service.GetPort() : Service.LoadConfiguredPort());
 	Payload->SetBoolField(TEXT("unsafePythonEnabled"), Service.IsUnsafePythonEnabled());
 	Payload->SetStringField(TEXT("backend"), AgentBackend.IsValid() ? AgentBackend->GetDisplayName() : TEXT("Unavailable"));
+	Payload->SetStringField(TEXT("backendId"), AgentBackend.IsValid() ? AgentBackend->GetBackendId() : TEXT(""));
+	Payload->SetStringField(TEXT("configuredBackend"), FWorldDataAgentBackendFactory::GetConfiguredBackendId());
 	Payload->SetBoolField(TEXT("resetConversations"), true);
 	DispatchEvent(TEXT("bootstrap"), Payload);
 	PublishServerState();
@@ -260,6 +273,8 @@ void SUEBridgeMCPWebPanel::PublishServerState()
 	Payload->SetNumberField(TEXT("port"), Service.IsRunning() ? Service.GetPort() : Service.LoadConfiguredPort());
 	Payload->SetBoolField(TEXT("unsafePythonEnabled"), Service.IsUnsafePythonEnabled());
 	Payload->SetStringField(TEXT("backend"), AgentBackend.IsValid() ? AgentBackend->GetDisplayName() : TEXT("Unavailable"));
+	Payload->SetStringField(TEXT("backendId"), AgentBackend.IsValid() ? AgentBackend->GetBackendId() : TEXT(""));
+	Payload->SetStringField(TEXT("configuredBackend"), FWorldDataAgentBackendFactory::GetConfiguredBackendId());
 	DispatchEvent(TEXT("server_state"), Payload);
 }
 
@@ -395,6 +410,33 @@ void SUEBridgeMCPWebPanel::HandleSetPermissionMode(const FString& PermissionMode
 	}
 }
 
+void SUEBridgeMCPWebPanel::HandleSetBackend(const FString& BackendId)
+{
+	const TArray<FWorldDataAgentBackendOption> Options = FWorldDataAgentBackendFactory::GetBackendOptions();
+	const FWorldDataAgentBackendOption* RequestedOption = Options.FindByPredicate([&BackendId](const FWorldDataAgentBackendOption& Option)
+	{
+		return Option.Id.Equals(BackendId, ESearchCase::IgnoreCase);
+	});
+	if (RequestedOption && !RequestedOption->bConfigured)
+	{
+		DispatchNotice(FString::Printf(TEXT("%s 尚未完成可信配置。请使用“配置 Codex 后端”验证并固定适配器。"), *RequestedOption->DisplayName));
+		PublishServerState();
+		return;
+	}
+
+	FString Error;
+	if (!FWorldDataAgentBackendFactory::SetConfiguredBackendId(BackendId, Error))
+	{
+		DispatchNotice(Error.IsEmpty() ? TEXT("无法切换会话后端。") : Error);
+		PublishServerState();
+		return;
+	}
+
+	StartAgentBackend();
+	PublishServerState();
+	DispatchNotice(FString::Printf(TEXT("已切换到 %s。"), AgentBackend.IsValid() ? *AgentBackend->GetDisplayName() : TEXT("所选后端")));
+}
+
 void SUEBridgeMCPWebPanel::HandleResolvePermission(const bool bAllow)
 {
 	if (PendingPermissionId == 0 || !AgentBackend.IsValid())
@@ -461,21 +503,71 @@ void SUEBridgeMCPWebPanel::HandleRefreshConnectionFiles()
 
 void SUEBridgeMCPWebPanel::HandleProvisionCli()
 {
-	IWorldDataMCPService& Service = GetWorldDataMCPService();
-	if (!Service.IsRunning())
+	if (bBackendSetupInProgress)
 	{
-		Service.StartConfigured();
-	}
-	if (!Service.IsRunning())
-	{
-		DispatchNotice(TEXT("MCP 服务启动失败，无法配置 CLI。"));
-		DispatchDetail(TEXT("CLI 配置结果"), Service.GetStatusJson());
+		DispatchNotice(TEXT("Codex 后端正在配置，请稍候。"));
 		return;
 	}
-	Service.ProvisionClientConfigurations();
-	PublishServerState();
-	DispatchDetail(TEXT("CLI 配置结果"), Service.GetCliSetupReportJson());
-	DispatchNotice(TEXT("本地 CLI 连接配置已更新。"));
+
+	// This path is only reached through the explicit setup button in the HTML
+	// panel.  Discovery never makes a candidate executable runnable on its own:
+	// PinProfileExecutable hashes it and writes the trusted, absolute pin first.
+	bBackendSetupInProgress = true;
+	DispatchNotice(TEXT("正在验证并绑定 Codex ACP 后端…"));
+	const TWeakPtr<SUEBridgeMCPWebPanel> WeakThis = StaticCastSharedRef<SUEBridgeMCPWebPanel>(AsShared());
+	Async(EAsyncExecution::ThreadPool, [WeakThis]()
+	{
+		FWorldDataCodexAcpBootstrapResult Result = FWorldDataCodexAcpBootstrap::FindOrInstall();
+		AsyncTask(ENamedThreads::GameThread, [WeakThis, Result = MoveTemp(Result)]() mutable
+		{
+			const TSharedPtr<SUEBridgeMCPWebPanel> Self = WeakThis.Pin();
+			if (!Self.IsValid())
+			{
+				return;
+			}
+
+			Self->bBackendSetupInProgress = false;
+			if (!Result.bSuccess)
+			{
+				Self->DispatchNotice(Result.Message.IsEmpty() ? TEXT("Codex ACP 后端配置失败。") : Result.Message);
+				Self->PublishServerState();
+				return;
+			}
+
+			FString PinError;
+			if (!FWorldDataCodexACPClient::PinProfileExecutable(TEXT("codex"), Result.ExecutablePath, PinError))
+			{
+				Self->DispatchNotice(PinError.IsEmpty() ? TEXT("Codex ACP 适配器的安全固定失败。") : PinError);
+				Self->PublishServerState();
+				return;
+			}
+
+			FString BackendError;
+			if (!FWorldDataAgentBackendFactory::SetConfiguredBackendId(TEXT("acp_codex"), BackendError))
+			{
+				Self->DispatchNotice(BackendError.IsEmpty() ? TEXT("Codex ACP 已验证，但未能设为当前后端。") : BackendError);
+				Self->PublishServerState();
+				return;
+			}
+
+			Self->StartAgentBackend();
+			IWorldDataMCPService& Service = GetWorldDataMCPService();
+			if (!Service.IsRunning())
+			{
+				Service.StartConfigured();
+			}
+			if (Service.IsRunning())
+			{
+				Service.ProvisionClientConfigurations();
+			}
+
+			Self->PublishServerState();
+			Self->DispatchDetail(TEXT("Codex ACP 后端已绑定"), FWorldDataAgentBackendFactory::GetDiagnosticsJson());
+			Self->DispatchNotice(Result.bInstalled
+				? TEXT("Codex ACP 已下载、校验并绑定到面板后端。")
+				: TEXT("Codex ACP 已校验并绑定到面板后端。"));
+		});
+	});
 }
 
 void SUEBridgeMCPWebPanel::HandleRequestDetail(const FString& DetailKind)

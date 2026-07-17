@@ -19,6 +19,7 @@ public:
 	TFunction<void(const FString& Prompt, const FString& ConversationId, const FString& PermissionMode)> OnSendPrompt;
 	TFunction<void(const FString& ConversationId)> OnSelectConversation;
 	TFunction<void(const FString& PermissionMode)> OnSetPermissionMode;
+	TFunction<void(const FString& BackendId)> OnSetBackend;
 	TFunction<void(bool bAllow)> OnResolvePermission;
 	TFunction<void(int32 Port)> OnStartServer;
 	TFunction<void()> OnStopServer;
@@ -38,6 +39,9 @@ public:
 
 	UFUNCTION()
 	void SetPermissionMode(const FString& PermissionMode);
+
+	UFUNCTION()
+	void SetBackend(const FString& BackendId);
 
 	UFUNCTION()
 	void ResolvePermission(bool bAllow);

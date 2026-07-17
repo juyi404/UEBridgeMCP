@@ -24,6 +24,14 @@ void UWorldDataCodexWebBridge::SetPermissionMode(const FString& PermissionMode)
 	}
 }
 
+void UWorldDataCodexWebBridge::SetBackend(const FString& BackendId)
+{
+	if (OnSetBackend)
+	{
+		OnSetBackend(BackendId);
+	}
+}
+
 void UWorldDataCodexWebBridge::ResolvePermission(const bool bAllow)
 {
 	if (OnResolvePermission)

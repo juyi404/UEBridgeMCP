@@ -43,6 +43,7 @@ private:
 	void HandleSendPrompt(const FString& Prompt, const FString& ConversationId, const FString& PermissionMode);
 	void HandleSelectConversation(const FString& ConversationId);
 	void HandleSetPermissionMode(const FString& PermissionMode);
+	void HandleSetBackend(const FString& BackendId);
 	void HandleResolvePermission(bool bAllow);
 	void HandleStartServer(int32 Port);
 	void HandleStopServer();
@@ -81,4 +82,5 @@ private:
 	int32 PendingPermissionId = 0;
 	EWorldDataCodexPermissionMode CurrentPermissionMode = EWorldDataCodexPermissionMode::Default;
 	bool bPageReady = false;
+	bool bBackendSetupInProgress = false;
 };

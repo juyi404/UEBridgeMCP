@@ -163,6 +163,18 @@ FWorldDataCodexAcpBootstrapResult FWorldDataCodexAcpBootstrap::FindOrInstall()
 		return Result;
 	}
 
+	// Earlier project bootstrap flows placed the native adapter directly under
+	// Saved/UEBridgeMCP.  Treat it as an explicit setup candidate only; the
+	// caller still has to verify and SHA-256 pin it before it can be launched.
+	const FString LegacyManagedAdapter = NormalizePath(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP"), TEXT("codex-acp.exe")));
+	if (IsExistingFile(LegacyManagedAdapter))
+	{
+		Result.bSuccess = true;
+		Result.ExecutablePath = LegacyManagedAdapter;
+		Result.Message = TEXT("Found the project-managed Codex ACP adapter.");
+		return Result;
+	}
+
 	const FString NpmExecutable = FindNpmExecutable();
 	if (NpmExecutable.IsEmpty())
 	{
