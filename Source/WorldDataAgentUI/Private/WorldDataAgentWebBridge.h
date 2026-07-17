@@ -36,23 +36,41 @@ public:
 	void ResolveApproval(const FString& RequestId, bool bApproved);
 
 private:
+	struct FConversationSession
+	{
+		TArray<FWorldDataConversationItem> Items;
+		FWorldDataAgentEvent PendingApproval;
+		FString PendingFirstMessage;
+		FString ActiveTurnId;
+		FString ErrorCode;
+		FString ErrorMessage;
+		bool bDraft = false;
+		bool bCreating = false;
+		bool bLoading = false;
+		bool bTurnActive = false;
+		bool bLoaded = false;
+
+		bool IsBusy() const { return bCreating || bLoading || bTurnActive; }
+	};
+
 	void HandleAgentEvent(const FWorldDataAgentEvent& Event);
-	void AddDraftConversation();
-	void BindDraftConversation(const FString& ThreadId);
-	void StartThreadForPendingMessage();
-	void SendTurn(const FString& Text);
+	FString AddDraftConversation();
+	void BindDraftConversation(const FString& DraftId, const FString& ThreadId);
+	void StartThread(const FString& DraftId);
+	void SendTurn(const FString& ThreadId, const FString& Text);
+	FConversationSession& GetOrAddSession(const FString& ThreadId);
+	FConversationSession* FindSession(const FString& ThreadId);
+	const FConversationSession* FindSession(const FString& ThreadId) const;
+	FConversationSession* FindSessionForEvent(const FWorldDataAgentEvent& Event);
 	void SetUiError(const FString& Code, const FString& Message);
 
 	FDelegateHandle EventHandle;
 	TArray<FWorldDataThreadSummary> Threads;
-	TArray<FWorldDataConversationItem> ConversationItems;
-	FWorldDataAgentEvent PendingApproval;
+	TMap<FString, FConversationSession> ConversationSessions;
+	TMap<FString, FString> PendingRequestThreadIds;
 	FString ActiveThreadId;
 	FString SelectedModel;
-	FString PendingFirstMessage;
 	FString UiErrorCode;
 	FString UiErrorMessage;
 	bool bConfiguring = false;
-	bool bBusy = false;
-	bool bActiveThreadIsDraft = false;
 };

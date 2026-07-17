@@ -10,6 +10,7 @@
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "WorldDataMCPToolRegistry.h"
 
 namespace
 {
@@ -60,6 +61,25 @@ namespace
 		Json->SetStringField(TEXT("status"), Item.Status);
 		return Json;
 	}
+
+	TSharedRef<FJsonObject> ToolJson(const WorldDataMCP::FToolMetadata& Tool)
+	{
+		TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+		Json->SetStringField(TEXT("name"), Tool.Name);
+		Json->SetStringField(TEXT("provider"), Tool.ProviderName);
+		Json->SetStringField(TEXT("risk"), WorldDataMCP::GetToolRiskName(Tool.Risk));
+		Json->SetBoolField(TEXT("requiresApproval"), Tool.bRequiresInteractiveApproval);
+		Json->SetBoolField(TEXT("audited"), Tool.bAudited);
+		Json->SetStringField(TEXT("revisionPolicy"), WorldDataMCP::GetToolRevisionPolicyName(Tool.RevisionPolicy));
+
+		TArray<TSharedPtr<FJsonValue>> Capabilities;
+		for (const FString& Capability : Tool.RequiredCapabilities)
+		{
+			Capabilities.Add(MakeShared<FJsonValueString>(Capability));
+		}
+		Json->SetArrayField(TEXT("requiredCapabilities"), Capabilities);
+		return Json;
+	}
 }
 
 void UWorldDataAgentWebBridge::Initialize()
@@ -84,11 +104,12 @@ FString UWorldDataAgentWebBridge::GetState()
 	IWorldDataAgentSubsystem& Subsystem = IWorldDataAgentBootstrapModule::Get().GetSubsystem();
 	const FWorldDataAgentStatusSnapshot Status = Subsystem.GetGateway().GetStatus();
 	const FWorldDataAgentRuntimeStatus Runtime = Subsystem.GetRuntimeStatus();
+	const FConversationSession* ActiveSession = FindSession(ActiveThreadId);
 
 	TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetNumberField(TEXT("schemaVersion"), 1);
 	Root->SetBoolField(TEXT("configuring"), bConfiguring);
-	Root->SetBoolField(TEXT("busy"), bBusy);
+	Root->SetBoolField(TEXT("busy"), ActiveSession && ActiveSession->IsBusy());
 	Root->SetStringField(TEXT("activeThreadId"), ActiveThreadId);
 	Root->SetStringField(TEXT("selectedModel"), SelectedModel);
 
@@ -122,14 +143,40 @@ FString UWorldDataAgentWebBridge::GetState()
 	RuntimeJson->SetStringField(TEXT("codexSha256"), Runtime.CodexSha256);
 	Root->SetObjectField(TEXT("runtime"), RuntimeJson);
 
+	TArray<TSharedPtr<FJsonValue>> ToolValues;
+	for (const WorldDataMCP::FToolMetadata& Tool : WorldDataMCP::FToolRegistry::Get().GetRegisteredToolMetadata())
+	{
+		ToolValues.Add(MakeShared<FJsonValueObject>(ToolJson(Tool)));
+	}
+	Root->SetArrayField(TEXT("tools"), ToolValues);
+
 	TArray<TSharedPtr<FJsonValue>> ThreadValues;
-	for (const FWorldDataThreadSummary& Thread : Threads) ThreadValues.Add(MakeShared<FJsonValueObject>(ThreadJson(Thread)));
+	for (const FWorldDataThreadSummary& Thread : Threads)
+	{
+		FWorldDataThreadSummary PresentedThread = Thread;
+		if (const FConversationSession* Session = FindSession(Thread.Id))
+		{
+			if (Session->PendingApproval.Type == EWorldDataAgentEventType::ApprovalRequested) PresentedThread.Status = TEXT("approval");
+			else if (Session->bCreating) PresentedThread.Status = TEXT("creating");
+			else if (Session->bLoading) PresentedThread.Status = TEXT("loading");
+			else if (Session->bTurnActive) PresentedThread.Status = TEXT("running");
+		}
+		ThreadValues.Add(MakeShared<FJsonValueObject>(ThreadJson(PresentedThread)));
+	}
 	Root->SetArrayField(TEXT("threads"), ThreadValues);
 	TArray<TSharedPtr<FJsonValue>> ConversationValues;
-	for (const FWorldDataConversationItem& Item : ConversationItems) ConversationValues.Add(MakeShared<FJsonValueObject>(ConversationItemJson(Item)));
+	if (ActiveSession)
+	{
+		for (const FWorldDataConversationItem& Item : ActiveSession->Items)
+		{
+			ConversationValues.Add(MakeShared<FJsonValueObject>(ConversationItemJson(Item)));
+		}
+	}
 	Root->SetArrayField(TEXT("conversation"), ConversationValues);
 
 	TSharedRef<FJsonObject> Approval = MakeShared<FJsonObject>();
+	const FWorldDataAgentEvent EmptyApproval;
+	const FWorldDataAgentEvent& PendingApproval = ActiveSession ? ActiveSession->PendingApproval : EmptyApproval;
 	Approval->SetBoolField(TEXT("pending"), PendingApproval.Type == EWorldDataAgentEventType::ApprovalRequested);
 	Approval->SetStringField(TEXT("requestId"), PendingApproval.RequestId);
 	Approval->SetStringField(TEXT("threadId"), PendingApproval.ThreadId);
@@ -139,8 +186,12 @@ FString UWorldDataAgentWebBridge::GetState()
 	Root->SetObjectField(TEXT("approval"), Approval);
 
 	TSharedRef<FJsonObject> Error = MakeShared<FJsonObject>();
-	const FString ErrorCode = !UiErrorCode.IsEmpty() ? UiErrorCode : Status.Error.Code;
-	const FString ErrorMessage = !UiErrorMessage.IsEmpty() ? UiErrorMessage : Status.Error.Message;
+	const FString ErrorCode = ActiveSession && !ActiveSession->ErrorCode.IsEmpty()
+		? ActiveSession->ErrorCode
+		: (!UiErrorCode.IsEmpty() ? UiErrorCode : Status.Error.Code);
+	const FString ErrorMessage = ActiveSession && !ActiveSession->ErrorMessage.IsEmpty()
+		? ActiveSession->ErrorMessage
+		: (!UiErrorMessage.IsEmpty() ? UiErrorMessage : Status.Error.Message);
 	Error->SetBoolField(TEXT("present"), !ErrorCode.IsEmpty() || !ErrorMessage.IsEmpty());
 	Error->SetStringField(TEXT("code"), ErrorCode);
 	Error->SetStringField(TEXT("message"), ErrorMessage);
@@ -182,55 +233,49 @@ void UWorldDataAgentWebBridge::RefreshThreads()
 
 void UWorldDataAgentWebBridge::NewConversation()
 {
-	if (bBusy)
-	{
-		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current response to finish before starting a new conversation."));
-		return;
-	}
-	if (bActiveThreadIsDraft)
-	{
-		Threads.RemoveAll([this](const FWorldDataThreadSummary& Thread) { return Thread.Id == ActiveThreadId; });
-	}
-	ConversationItems.Empty();
-	PendingFirstMessage.Empty();
-	PendingApproval = FWorldDataAgentEvent();
 	UiErrorCode.Empty();
 	UiErrorMessage.Empty();
-	AddDraftConversation();
-	bBusy = true;
-	StartThreadForPendingMessage();
+	const FString DraftId = AddDraftConversation();
+	StartThread(DraftId);
 }
 
 void UWorldDataAgentWebBridge::ResumeThread(const FString& ThreadId, const FString& Model)
 {
 	if (ThreadId.IsEmpty()) return;
-	if (bActiveThreadIsDraft && ThreadId == ActiveThreadId) return;
-	if (bBusy)
-	{
-		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current response to finish before switching conversations."));
-		return;
-	}
-	if (bActiveThreadIsDraft)
-	{
-		Threads.RemoveAll([this](const FWorldDataThreadSummary& Thread) { return Thread.Id == ActiveThreadId; });
-		bActiveThreadIsDraft = false;
-	}
 	SelectedModel = Model;
-	bBusy = true;
+	UiErrorCode.Empty();
+	UiErrorMessage.Empty();
+	ActiveThreadId = ThreadId;
+	FConversationSession& Session = GetOrAddSession(ThreadId);
+	if (Session.bDraft || Session.bLoaded || Session.bLoading) return;
+
+	Session.bLoading = true;
+	Session.ErrorCode.Empty();
+	Session.ErrorMessage.Empty();
 	FWorldDataResumeThreadRequest Request;
 	Request.ThreadId = ThreadId;
 	Request.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	Request.Model = Model;
 	Request.ApprovalPolicy = TEXT("on-request");
 	Request.SandboxMode = TEXT("workspace-write");
-	if (IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().ResumeThread(Request).IsEmpty()) bBusy = false;
+	const FString RequestId = IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().ResumeThread(Request);
+	if (RequestId.IsEmpty())
+	{
+		Session.bLoading = false;
+		Session.ErrorCode = TEXT("thread.resume_not_started");
+		Session.ErrorMessage = TEXT("The conversation could not be loaded.");
+	}
+	else
+	{
+		PendingRequestThreadIds.Add(RequestId, ThreadId);
+	}
 }
 
 void UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FString& Text, const FString& Model)
 {
 	FString Message = Text;
 	Message.TrimStartAndEndInline();
-	if (Message.IsEmpty() || bBusy) return;
+	if (Message.IsEmpty()) return;
 	SelectedModel = Model;
 	UiErrorCode.Empty();
 	UiErrorMessage.Empty();
@@ -239,33 +284,50 @@ void UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FStrin
 		SetUiError(TEXT("thread.not_resumed"), TEXT("Resume the selected conversation before sending a message."));
 		return;
 	}
+	if (ActiveThreadId.IsEmpty())
+	{
+		ActiveThreadId = AddDraftConversation();
+	}
+	FConversationSession& Session = GetOrAddSession(ActiveThreadId);
+	if (Session.IsBusy()) return;
+	Session.ErrorCode.Empty();
+	Session.ErrorMessage.Empty();
 
 	FWorldDataConversationItem UserItem;
 	UserItem.Id = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	UserItem.Kind = TEXT("message");
 	UserItem.Role = TEXT("user");
 	UserItem.Text = Message;
-	ConversationItems.Add(MoveTemp(UserItem));
-	bBusy = true;
-	if (ActiveThreadId.IsEmpty() || bActiveThreadIsDraft)
+	Session.Items.Add(MoveTemp(UserItem));
+	if (Session.bDraft)
 	{
-		PendingFirstMessage = Message;
-		StartThreadForPendingMessage();
+		Session.PendingFirstMessage = Message;
+		if (!Session.bCreating) StartThread(ActiveThreadId);
 		return;
 	}
-	SendTurn(Message);
+	SendTurn(ActiveThreadId, Message);
 }
 
 void UWorldDataAgentWebBridge::ResolveApproval(const FString& RequestId, const bool bApproved)
 {
-	if (PendingApproval.Type != EWorldDataAgentEventType::ApprovalRequested || PendingApproval.RequestId != RequestId) return;
+	FConversationSession* Session = nullptr;
+	for (TPair<FString, FConversationSession>& Pair : ConversationSessions)
+	{
+		if (Pair.Value.PendingApproval.Type == EWorldDataAgentEventType::ApprovalRequested
+			&& Pair.Value.PendingApproval.RequestId == RequestId)
+		{
+			Session = &Pair.Value;
+			break;
+		}
+	}
+	if (!Session) return;
 	FWorldDataApprovalDecision Decision;
-	Decision.RequestId = PendingApproval.RequestId;
-	Decision.ThreadId = PendingApproval.ThreadId;
-	Decision.TurnId = PendingApproval.TurnId;
+	Decision.RequestId = Session->PendingApproval.RequestId;
+	Decision.ThreadId = Session->PendingApproval.ThreadId;
+	Decision.TurnId = Session->PendingApproval.TurnId;
 	Decision.bApproved = bApproved;
 	IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().ResolveApproval(Decision);
-	PendingApproval = FWorldDataAgentEvent();
+	Session->PendingApproval = FWorldDataAgentEvent();
 }
 
 void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Event)
@@ -276,59 +338,92 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 		if (Event.Status.State == EWorldDataAgentConnectionState::Ready && Threads.IsEmpty()) RefreshThreads();
 		break;
 	case EWorldDataAgentEventType::ThreadsListed:
-		if (bActiveThreadIsDraft)
+	{
+		TArray<FWorldDataThreadSummary> LocalThreads = MoveTemp(Threads);
+		Threads = Event.Threads;
+		for (FWorldDataThreadSummary& LocalThread : LocalThreads)
 		{
-			const FWorldDataThreadSummary* Draft = Threads.FindByPredicate([this](const FWorldDataThreadSummary& Thread)
+			if (!Threads.ContainsByPredicate([&LocalThread](const FWorldDataThreadSummary& Thread)
 			{
-				return Thread.Id == ActiveThreadId;
-			});
-			const TOptional<FWorldDataThreadSummary> SavedDraft = Draft ? TOptional<FWorldDataThreadSummary>(*Draft) : TOptional<FWorldDataThreadSummary>();
-			Threads = Event.Threads;
-			if (SavedDraft.IsSet()) Threads.Insert(SavedDraft.GetValue(), 0);
-		}
-		else
-		{
-			Threads = Event.Threads;
+				return Thread.Id == LocalThread.Id;
+			})) Threads.Insert(MoveTemp(LocalThread), 0);
 		}
 		break;
+	}
 	case EWorldDataAgentEventType::ThreadCreated:
-		BindDraftConversation(Event.ThreadId);
-		if (!PendingFirstMessage.IsEmpty())
+	{
+		FString DraftId;
+		PendingRequestThreadIds.RemoveAndCopyValue(Event.RequestId, DraftId);
+		if (DraftId.IsEmpty())
 		{
-			const FString Message = MoveTemp(PendingFirstMessage);
-			PendingFirstMessage.Empty();
-			SendTurn(Message);
+			for (const TPair<FString, FConversationSession>& Pair : ConversationSessions)
+			{
+				if (Pair.Value.bDraft && Pair.Value.bCreating)
+				{
+					DraftId = Pair.Key;
+					break;
+				}
+			}
 		}
-		else
+		if (DraftId.IsEmpty()) break;
+		BindDraftConversation(DraftId, Event.ThreadId);
+		FConversationSession* Session = FindSession(Event.ThreadId);
+		if (!Session) break;
+		Session->bCreating = false;
+		Session->bDraft = false;
+		Session->bLoaded = true;
+		if (!Session->PendingFirstMessage.IsEmpty())
 		{
-			bBusy = false;
+			const FString Message = MoveTemp(Session->PendingFirstMessage);
+			Session->PendingFirstMessage.Empty();
+			SendTurn(Event.ThreadId, Message);
 		}
 		break;
+	}
 	case EWorldDataAgentEventType::ThreadLoaded:
-		ActiveThreadId = Event.ThreadId;
-		bActiveThreadIsDraft = false;
-		ConversationItems = Event.ConversationItems;
-		bBusy = false;
+	{
+		PendingRequestThreadIds.Remove(Event.RequestId);
+		FConversationSession& Session = GetOrAddSession(Event.ThreadId);
+		Session.Items = Event.ConversationItems;
+		Session.bDraft = false;
+		Session.bLoading = false;
+		Session.bLoaded = true;
+		Session.ErrorCode.Empty();
+		Session.ErrorMessage.Empty();
 		break;
+	}
 	case EWorldDataAgentEventType::TurnStarted:
-		bBusy = true;
+	{
+		PendingRequestThreadIds.Remove(Event.RequestId);
+		if (FConversationSession* Session = FindSession(Event.ThreadId))
+		{
+			Session->bTurnActive = true;
+			Session->ActiveTurnId = Event.TurnId;
+		}
 		break;
+	}
 	case EWorldDataAgentEventType::MessageDelta:
-		if (ConversationItems.IsEmpty() || ConversationItems.Last().Role != TEXT("assistant") || ConversationItems.Last().TurnId != Event.TurnId)
+	{
+		FConversationSession* Session = FindSession(Event.ThreadId);
+		if (!Session) break;
+		if (Session->Items.IsEmpty() || Session->Items.Last().Role != TEXT("assistant") || Session->Items.Last().TurnId != Event.TurnId)
 		{
 			FWorldDataConversationItem Item;
 			Item.Id = Event.ItemId;
 			Item.TurnId = Event.TurnId;
 			Item.Kind = TEXT("message");
 			Item.Role = TEXT("assistant");
-			ConversationItems.Add(MoveTemp(Item));
+			Session->Items.Add(MoveTemp(Item));
 		}
-		ConversationItems.Last().Text += Event.Text;
+		Session->Items.Last().Text += Event.Text;
 		break;
+	}
 	case EWorldDataAgentEventType::ToolStarted:
 	case EWorldDataAgentEventType::ToolCompleted:
 	{
-		FWorldDataConversationItem* Existing = ConversationItems.FindByPredicate([&Event](const FWorldDataConversationItem& Item)
+		FConversationSession* Session = FindSession(Event.ThreadId);
+		if (!Session) break;
+		FWorldDataConversationItem* Existing = Session->Items.FindByPredicate([&Event](const FWorldDataConversationItem& Item)
 		{
 			return !Event.ItemId.IsEmpty() && Item.Id == Event.ItemId;
 		});
@@ -340,96 +435,159 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 			Item.Kind = TEXT("tool");
 			Item.Role = TEXT("tool");
 			Item.ToolName = Event.ToolName;
-			ConversationItems.Add(MoveTemp(Item));
-			Existing = &ConversationItems.Last();
+			Session->Items.Add(MoveTemp(Item));
+			Existing = &Session->Items.Last();
 		}
 		Existing->Status = Event.Type == EWorldDataAgentEventType::ToolCompleted ? TEXT("completed") : TEXT("running");
 		Existing->Text = Existing->Status;
 		break;
 	}
 	case EWorldDataAgentEventType::ApprovalRequested:
-		PendingApproval = Event;
+		if (FConversationSession* Session = FindSession(Event.ThreadId)) Session->PendingApproval = Event;
 		break;
 	case EWorldDataAgentEventType::TurnCompleted:
-		bBusy = false;
+		if (FConversationSession* Session = FindSession(Event.ThreadId))
+		{
+			Session->bTurnActive = false;
+			Session->ActiveTurnId.Empty();
+			Session->PendingApproval = FWorldDataAgentEvent();
+		}
 		RefreshThreads();
 		break;
 	case EWorldDataAgentEventType::TurnFailed:
-		bBusy = false;
-		SetUiError(Event.Error.Code, Event.Error.Message);
+	{
+		FConversationSession* Session = FindSessionForEvent(Event);
+		if (Session)
+		{
+			Session->bCreating = false;
+			Session->bLoading = false;
+			Session->bTurnActive = false;
+			Session->ActiveTurnId.Empty();
+			Session->ErrorCode = Event.Error.Code;
+			Session->ErrorMessage = Event.Error.Message;
+		}
+		else
+		{
+			SetUiError(Event.Error.Code, Event.Error.Message);
+		}
 		break;
+	}
 	default:
 		break;
 	}
 }
 
-void UWorldDataAgentWebBridge::AddDraftConversation()
+FString UWorldDataAgentWebBridge::AddDraftConversation()
 {
 	const int64 Now = FDateTime::UtcNow().ToUnixTimestamp();
 	FWorldDataThreadSummary Draft;
 	Draft.Id = FString::Printf(TEXT("draft-%s"), *FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
-	Draft.Title = TEXT("新对话");
+	Draft.Title = TEXT("\u65B0\u5BF9\u8BDD");
 	Draft.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	Draft.CreatedAt = Now;
 	Draft.UpdatedAt = Now;
 	Draft.RecencyAt = Now;
 	Draft.Status = TEXT("draft");
 	ActiveThreadId = Draft.Id;
-	bActiveThreadIsDraft = true;
+	FConversationSession& Session = GetOrAddSession(Draft.Id);
+	Session = FConversationSession();
+	Session.bDraft = true;
 	Threads.Insert(MoveTemp(Draft), 0);
+	return ActiveThreadId;
 }
 
-void UWorldDataAgentWebBridge::BindDraftConversation(const FString& ThreadId)
+void UWorldDataAgentWebBridge::BindDraftConversation(const FString& DraftId, const FString& ThreadId)
 {
-	const FString PreviousId = ActiveThreadId;
-	ActiveThreadId = ThreadId;
-	if (bActiveThreadIsDraft)
+	if (FWorldDataThreadSummary* Draft = Threads.FindByPredicate([&DraftId](const FWorldDataThreadSummary& Thread)
 	{
-		if (FWorldDataThreadSummary* Draft = Threads.FindByPredicate([&PreviousId](const FWorldDataThreadSummary& Thread)
-		{
-			return Thread.Id == PreviousId;
-		}))
-		{
-			Draft->Id = ThreadId;
-			Draft->Status = TEXT("active");
-		}
-		bActiveThreadIsDraft = false;
-		return;
+		return Thread.Id == DraftId;
+	}))
+	{
+		Draft->Id = ThreadId;
+		Draft->Status = TEXT("active");
 	}
 
-	if (!Threads.ContainsByPredicate([&ThreadId](const FWorldDataThreadSummary& Thread) { return Thread.Id == ThreadId; }))
+	FConversationSession Session;
+	if (ConversationSessions.RemoveAndCopyValue(DraftId, Session))
 	{
-		const int64 Now = FDateTime::UtcNow().ToUnixTimestamp();
-		FWorldDataThreadSummary Thread;
-		Thread.Id = ThreadId;
-		Thread.Title = TEXT("新对话");
-		Thread.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-		Thread.CreatedAt = Now;
-		Thread.UpdatedAt = Now;
-		Thread.RecencyAt = Now;
-		Thread.Status = TEXT("active");
-		Threads.Insert(MoveTemp(Thread), 0);
+		Session.bDraft = false;
+		ConversationSessions.Add(ThreadId, MoveTemp(Session));
 	}
+	else
+	{
+		GetOrAddSession(ThreadId).bDraft = false;
+	}
+	if (ActiveThreadId == DraftId) ActiveThreadId = ThreadId;
 }
 
-void UWorldDataAgentWebBridge::StartThreadForPendingMessage()
+void UWorldDataAgentWebBridge::StartThread(const FString& DraftId)
 {
+	FConversationSession* Session = FindSession(DraftId);
+	if (!Session || Session->bCreating) return;
+	Session->bCreating = true;
 	FWorldDataCreateThreadRequest Request;
 	Request.ClientConversationId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	Request.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 	Request.Model = SelectedModel;
 	Request.ApprovalPolicy = TEXT("on-request");
 	Request.SandboxMode = TEXT("workspace-write");
-	if (IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().CreateThread(Request).IsEmpty()) bBusy = false;
+	const FString RequestId = IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().CreateThread(Request);
+	if (RequestId.IsEmpty())
+	{
+		Session->bCreating = false;
+		Session->ErrorCode = TEXT("thread.create_not_started");
+		Session->ErrorMessage = TEXT("The conversation could not be created.");
+	}
+	else
+	{
+		PendingRequestThreadIds.Add(RequestId, DraftId);
+	}
 }
 
-void UWorldDataAgentWebBridge::SendTurn(const FString& Text)
+void UWorldDataAgentWebBridge::SendTurn(const FString& ThreadId, const FString& Text)
 {
+	FConversationSession& Session = GetOrAddSession(ThreadId);
+	Session.bTurnActive = true;
 	FWorldDataSendTurnRequest Request;
-	Request.ThreadId = ActiveThreadId;
+	Request.ThreadId = ThreadId;
 	Request.ClientTurnId = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower);
 	Request.Text = Text;
-	if (IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().SendTurn(Request).IsEmpty()) bBusy = false;
+	Session.ActiveTurnId = Request.ClientTurnId;
+	const FString RequestId = IWorldDataAgentBootstrapModule::Get().GetSubsystem().GetGateway().SendTurn(Request);
+	if (RequestId.IsEmpty())
+	{
+		Session.bTurnActive = false;
+		Session.ActiveTurnId.Empty();
+		Session.ErrorCode = TEXT("turn.send_not_started");
+		Session.ErrorMessage = TEXT("The message could not be sent.");
+	}
+	else
+	{
+		PendingRequestThreadIds.Add(RequestId, ThreadId);
+	}
+}
+
+UWorldDataAgentWebBridge::FConversationSession& UWorldDataAgentWebBridge::GetOrAddSession(const FString& ThreadId)
+{
+	return ConversationSessions.FindOrAdd(ThreadId);
+}
+
+UWorldDataAgentWebBridge::FConversationSession* UWorldDataAgentWebBridge::FindSession(const FString& ThreadId)
+{
+	return ThreadId.IsEmpty() ? nullptr : ConversationSessions.Find(ThreadId);
+}
+
+const UWorldDataAgentWebBridge::FConversationSession* UWorldDataAgentWebBridge::FindSession(const FString& ThreadId) const
+{
+	return ThreadId.IsEmpty() ? nullptr : ConversationSessions.Find(ThreadId);
+}
+
+UWorldDataAgentWebBridge::FConversationSession* UWorldDataAgentWebBridge::FindSessionForEvent(const FWorldDataAgentEvent& Event)
+{
+	if (FConversationSession* Session = FindSession(Event.ThreadId)) return Session;
+	FString ThreadId;
+	if (PendingRequestThreadIds.RemoveAndCopyValue(Event.RequestId, ThreadId)) return FindSession(ThreadId);
+	return nullptr;
 }
 
 void UWorldDataAgentWebBridge::SetUiError(const FString& Code, const FString& Message)

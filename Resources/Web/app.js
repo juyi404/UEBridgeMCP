@@ -82,7 +82,7 @@
   }
 
   function threadStatusLabel(status) {
-    const labels = Object.freeze({ loaded: "已加载", active: "进行中", idle: "空闲", systemError: "异常" });
+    const labels = Object.freeze({ creating: "创建中", loading: "加载中", running: "生成中", approval: "待确认", systemError: "异常" });
     return labels[status] || "";
   }
   const bridge = () => window.ue && window.ue.worlddata;
@@ -148,7 +148,7 @@
       const title = thread.title || thread.preview || "新对话";
       const status = threadStatusLabel(thread.status);
       const tooltip = status ? `${title} · ${status}` : title;
-      return `<button class="conversation" type="button" aria-current="${thread.id === next.activeThreadId ? "page" : "false"}" data-thread-id="${escapeHtml(thread.id)}" title="${escapeHtml(tooltip)}"><span class="conversation__title">${escapeHtml(title)}</span><span class="conversation__age">${relativeTime(threadTimestamp(thread))}</span></button>`;
+      return `<button class="conversation" type="button" aria-current="${thread.id === next.activeThreadId ? "page" : "false"}" data-thread-id="${escapeHtml(thread.id)}" title="${escapeHtml(tooltip)}"><span class="conversation__title">${escapeHtml(title)}</span><span class="conversation__age">${escapeHtml(status || relativeTime(threadTimestamp(thread)))}</span></button>`;
     }).join("") || `<div class="conversation-empty">暂无本项目会话</div>`;
   }
 
@@ -159,7 +159,7 @@
   }
 
   function renderConversation(next) {
-    const signature = JSON.stringify((next.conversation || []).map(item => [item.id, item.status, item.text && item.text.length]));
+    const signature = JSON.stringify([next.activeThreadId, ...(next.conversation || []).map(item => [item.id, item.status, item.text && item.text.length])]);
     if (signature === previousConversationSignature) return;
     const wasNearBottom = elements.messageList.scrollHeight - elements.messageList.scrollTop - elements.messageList.clientHeight < 100;
     previousConversationSignature = signature;
