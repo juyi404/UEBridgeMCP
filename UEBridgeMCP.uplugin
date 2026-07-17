@@ -11,6 +11,36 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "WorldDataAgentContracts",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentSecurity",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentDiagnostics",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentRuntime",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentClient",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentBootstrap",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "UEBridgeMCPCore",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "Default"
@@ -21,6 +51,16 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "UEBridgeMCPLegacyToolGroups",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "WorldDataAgentUI",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "PostEngineInit"
+		},
+		{
 			"Name": "UEBridgeMCPEditor",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "PostEngineInit"
@@ -29,6 +69,46 @@
 	"Plugins": [
 		{
 			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		},
+		{
+			"Name": "ControlRig",
+			"Enabled": true
+		},
+		{
+			"Name": "DataValidation",
+			"Enabled": true
+		},
+		{
+			"Name": "EditorScriptingUtilities",
+			"Enabled": true
+		},
+		{
+			"Name": "EnhancedInput",
+			"Enabled": true
+		},
+		{
+			"Name": "GameplayAbilities",
+			"Enabled": true
+		},
+		{
+			"Name": "IKRig",
+			"Enabled": true
+		},
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "PCG",
+			"Enabled": true
+		},
+		{
+			"Name": "PropertyBindingUtils",
+			"Enabled": true
+		},
+		{
+			"Name": "StateTree",
 			"Enabled": true
 		}
 	]

@@ -1,10 +1,12 @@
-#include "SUEBridgeMCPPanel.h"
+#include "IWorldDataAgentBootstrapModule.h"
+#include "IWorldDataAgentUIModule.h"
 #include "UEBridgeMCPCoreModule.h"
 
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/Docking/TabManager.h"
 #include "Modules/ModuleManager.h"
+#include "Misc/Paths.h"
 #include "Styling/AppStyle.h"
 #include "Textures/SlateIcon.h"
 #include "ToolMenu.h"
@@ -17,6 +19,11 @@
 
 #define LOCTEXT_NAMESPACE "UEBridgeMCPEditor"
 
+namespace
+{
+	const FName PanelTabName(TEXT("WorldDataAgentPanel"));
+}
+
 class FUEBridgeMCPEditorModule : public IModuleInterface
 {
 public:
@@ -25,10 +32,24 @@ public:
 		// Load Core first, then let Tools register every handler before the first
 		// HTTP request can observe tools/list.
 		FModuleManager::LoadModuleChecked<IModuleInterface>(TEXT("UEBridgeMCPTools"));
-		IUEBridgeMCPCoreModule::Get().GetService().StartConfigured();
+		IWorldDataMCPService& McpService = IUEBridgeMCPCoreModule::Get().GetService();
+		McpService.StartConfigured();
+
+		FWorldDataAgentConnectionOptions AgentOptions;
+		AgentOptions.ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		AgentOptions.RuntimeManifestPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP"), TEXT("Runtime"), TEXT("runtime-manifest.json")));
+		AgentOptions.McpUrl = McpService.IsRunning() ? McpService.GetMcpUrl() : FString();
+		IWorldDataAgentSubsystem& AgentSubsystem = IWorldDataAgentBootstrapModule::Get().GetSubsystem();
+		FString SecretError;
+		AgentSubsystem.GetSecurity().StoreEphemeralSecret(
+			TEXT("worlddata_mcp"),
+			McpService.GetAccessToken(),
+			AgentOptions.McpSecretHandle,
+			SecretError);
+		AgentSubsystem.Initialize(AgentOptions);
 
 		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
-			UEBridgeMCP::PanelTabName,
+			PanelTabName,
 			FOnSpawnTab::CreateRaw(this, &FUEBridgeMCPEditorModule::SpawnPanelTab))
 			.SetDisplayName(LOCTEXT("PanelTabDisplayName", "WorldData MCP 控制台"))
 			.SetTooltipText(LOCTEXT("PanelTabTooltip", "打开 WorldData MCP 控制台。"))
@@ -45,9 +66,10 @@ public:
 		UToolMenus::UnregisterOwner(this);
 		if (FSlateApplication::IsInitialized())
 		{
-			FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UEBridgeMCP::PanelTabName);
+			FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(PanelTabName);
 		}
 
+		IWorldDataAgentBootstrapModule::Get().GetSubsystem().Shutdown();
 		IUEBridgeMCPCoreModule::Get().GetService().Stop();
 	}
 
@@ -57,7 +79,7 @@ private:
 		return SNew(SDockTab)
 			.TabRole(ETabRole::NomadTab)
 			[
-				CreateUEBridgeMCPPanel()
+				IWorldDataAgentUIModule::Get().CreatePanel()
 			];
 	}
 
@@ -78,7 +100,7 @@ private:
 
 	void OpenPanel()
 	{
-		FGlobalTabmanager::Get()->TryInvokeTab(UEBridgeMCP::PanelTabName);
+		FGlobalTabmanager::Get()->TryInvokeTab(PanelTabName);
 	}
 };
 

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>WorldData Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">WD</span><span>Unlimited.AI</span></div>
+      <button id="new-chat" class="primary-action"><span>＋</span> 新建会话</button>
+      <nav class="nav" aria-label="主导航">
+        <button id="nav-chat" class="nav-item active" data-route="chat"><span>○</span>聊天</button>
+        <button id="nav-settings" class="nav-item" data-route="settings"><span>⚙</span>设置</button>
+      </nav>
+      <div class="history-head"><span>聊天记录</span><span id="thread-count">0 个会话</span></div>
+      <div id="thread-list" class="thread-list"></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">WORLDDATA / CODEX</div>
+          <h1 id="page-title">Codex 会话</h1>
+          <div id="connection-line" class="connection-line"><span class="dot"></span><span>正在读取服务状态…</span></div>
+        </div>
+        <div class="toolbar">
+          <button id="refresh" class="button">刷新会话</button>
+          <button id="top-settings" class="button">设置</button>
+          <span id="ready-pill" class="pill neutral">初始化中</span>
+        </div>
+      </header>
+
+      <section id="chat-view" class="view chat-view">
+        <div class="environment-banner">
+          <span class="banner-icon">C</span>
+          <div><strong>本地交互环境</strong><p>消息、工具调用和审批均通过 Agent Host 协议同步，不依赖界面识别。</p></div>
+        </div>
+        <div id="chat-error" class="error-card hidden"></div>
+        <div id="message-list" class="message-list">
+          <div class="empty-state"><strong>今天我能帮您做什么？</strong><span>连接完成后，可直接操作当前 Unreal 项目。</span></div>
+        </div>
+        <form id="composer" class="composer">
+          <textarea id="message-input" rows="3" placeholder="输入消息…（Enter 发送，Shift + Enter 换行）"></textarea>
+          <div class="composer-footer">
+            <div class="composer-options">
+              <span class="chip">WorldData MCP</span>
+              <label class="model-label">模型
+                <select id="model-select"></select>
+              </label>
+            </div>
+            <button id="send" class="send-button" type="submit">发送</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="settings-view" class="view settings-view hidden">
+        <div class="settings-heading"><div><h2>设置</h2><p>运行时只需配置一次；后续启动会自动校验并连接。</p></div><button id="back-chat" class="button">返回聊天</button></div>
+        <div id="settings-content" class="settings-content"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="approval-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-kicker">需要确认</div>
+      <h2 id="approval-title">Codex 请求执行操作</h2>
+      <pre id="approval-text"></pre>
+      <div class="modal-actions"><button id="deny" class="button danger">拒绝</button><button id="approve" class="send-button">允许本次</button></div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

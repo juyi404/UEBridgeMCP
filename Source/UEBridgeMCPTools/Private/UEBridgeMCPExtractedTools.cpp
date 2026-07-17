@@ -1,7 +1,7 @@
 #include "UEBridgeMCPExtractedTools.h"
 
+#include "UEBridgeMCPCoreModule.h"
 #include "WorldDataMCPCommon.h"
-#include "WorldDataMCPServer.h"
 #include "WorldDataMCPTools.h"
 
 #include "Algo/Sort.h"
@@ -662,7 +662,8 @@ FString GetToolDefinitionsJson()
 
 FString ExecutePython(const TSharedPtr<FJsonObject>& Args)
 {
-	if (!FWorldDataMCPServer::IsUnsafePythonEnabled())
+	const IWorldDataMCPService& Service = GetWorldDataMCPService();
+	if (!Service.IsUnsafePythonEnabled())
 	{
 		return ErrorJson(TEXT("execute_python is disabled. Set [UEBridgeMCP.Security] bEnableUnsafePython=true in the project configuration, restart the editor, then explicitly copy the short-lived capability token from the UEBridgeMCP panel."));
 	}
@@ -684,7 +685,7 @@ FString ExecutePython(const TSharedPtr<FJsonObject>& Args)
 	}
 
 	const FString UnsafeToken = GetStringField(Args, TEXT("unsafe_token"));
-	if (!FWorldDataMCPServer::ValidateUnsafePythonCapability(UnsafeToken))
+	if (!Service.ValidateUnsafePythonCapability(UnsafeToken))
 	{
 		return ErrorJson(TEXT("execute_python requires the current short-lived unsafe_token copied explicitly from the UEBridgeMCP panel."));
 	}
@@ -732,7 +733,7 @@ FString GetLevelActors(const TSharedPtr<FJsonObject>& Args)
 
 FString GetProjectInfo(const TSharedPtr<FJsonObject>& Args)
 {
-	return FWorldDataMCPServer::GetProjectInfoJson();
+	return GetWorldDataMCPService().GetProjectInfoJson();
 }
 
 FString ListProjectModules(const TSharedPtr<FJsonObject>& Args)

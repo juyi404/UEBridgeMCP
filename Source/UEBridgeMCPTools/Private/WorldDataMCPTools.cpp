@@ -1,7 +1,7 @@
 #include "WorldDataMCPTools.h"
 
+#include "UEBridgeMCPCoreModule.h"
 #include "WorldDataMCPCommon.h"
-#include "WorldDataMCPServer.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/ActorComponent.h"
@@ -1750,9 +1750,10 @@ namespace WorldDataMCP
 			Result->SetBoolField(TEXT("success"), true);
 			Result->SetStringField(TEXT("purpose"), TEXT("Read this first. It gives an agent a compact, read-only strategy for understanding this Unreal project before taking action."));
 			Result->SetStringField(TEXT("projectName"), GetProjectName());
-			Result->SetStringField(TEXT("projectId"), FWorldDataMCPServer::GetProjectId());
-			Result->SetStringField(TEXT("serverName"), FWorldDataMCPServer::GetServerName());
-			Result->SetStringField(TEXT("mcpUrl"), FWorldDataMCPServer::GetMcpUrl());
+			const IWorldDataMCPService& Service = GetWorldDataMCPService();
+			Result->SetStringField(TEXT("projectId"), Service.GetProjectId());
+			Result->SetStringField(TEXT("serverName"), Service.GetServerName());
+			Result->SetStringField(TEXT("mcpUrl"), Service.GetMcpUrl());
 			Result->SetStringField(TEXT("engineVersion"), FEngineVersion::Current().ToString());
 
 			TSharedRef<FJsonObject> Editor = MakeShared<FJsonObject>();

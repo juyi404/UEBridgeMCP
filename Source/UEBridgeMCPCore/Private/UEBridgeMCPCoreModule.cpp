@@ -1,4 +1,5 @@
 #include "UEBridgeMCPCoreModule.h"
+#include "WorldDataMCPServer.h"
 
 namespace
 {
@@ -26,6 +27,7 @@ namespace
 		virtual FString GetConnectionFilePath() const override { return FWorldDataMCPServer::GetConnectionFilePath(); }
 		virtual bool IsUnsafePythonEnabled() const override { return FWorldDataMCPServer::IsUnsafePythonEnabled(); }
 		virtual FString GetUnsafePythonCapabilityToken() const override { return FWorldDataMCPServer::GetUnsafePythonCapabilityToken(); }
+		virtual bool ValidateUnsafePythonCapability(const FString& Candidate) const override { return FWorldDataMCPServer::ValidateUnsafePythonCapability(Candidate); }
 		virtual void RefreshConnectionFiles() override { FWorldDataMCPServer::RefreshConnectionFiles(); }
 		virtual void ProvisionClientConfigurations() override { FWorldDataMCPServer::ProvisionClientConfigurations(); }
 		virtual bool RotateAccessToken(FString& OutError) override { return FWorldDataMCPServer::RotateAccessToken(OutError); }

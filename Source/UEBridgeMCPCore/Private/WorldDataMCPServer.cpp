@@ -2291,7 +2291,7 @@ TSharedPtr<FJsonObject> FWorldDataMCPServer::ProcessJsonRpc(const TSharedPtr<FJs
 	if (Method == TEXT("initialize"))
 	{
 		// Session ids are minted by the HTTP layer (RegisterSession) so each client
-		// gets its own; in-process callers (Codex ACP bridge) need no session.
+		// gets its own; trusted in-process service callers need no session.
 		ResultObj = HandleInitialize(ParamsObj);
 	}
 	else if (Method == TEXT("tools/list"))

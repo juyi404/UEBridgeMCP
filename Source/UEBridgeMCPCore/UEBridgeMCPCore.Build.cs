@@ -6,7 +6,7 @@ public class UEBridgeMCPCore : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "HTTPServer" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core" });
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"HTTPServer",

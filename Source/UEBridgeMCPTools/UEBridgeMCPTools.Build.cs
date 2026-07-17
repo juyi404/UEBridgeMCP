@@ -6,7 +6,7 @@ public class UEBridgeMCPTools : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "UEBridgeMCPCore" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core" });
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"AssetRegistry",
@@ -16,6 +16,7 @@ public class UEBridgeMCPTools : ModuleRules
 			"JsonUtilities",
 			"Projects",
 			"PythonScriptPlugin",
+			"UEBridgeMCPCore",
 			"UnrealEd"
 		});
 	}

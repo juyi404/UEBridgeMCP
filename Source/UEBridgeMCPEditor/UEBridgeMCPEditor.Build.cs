@@ -15,17 +15,14 @@ public class UEBridgeMCPEditor : ModuleRules
 		{
 			"ApplicationCore",
 			"AppFramework",
-			"CoreUObject",
-			"Engine",
-			"Json",
-			"JsonUtilities",
-			"Projects",
 			"Slate",
 			"SlateCore",
 			"ToolMenus",
 			"UEBridgeMCPCore",
 			"UEBridgeMCPTools",
-			"WebBrowser",
+			"WorldDataAgentBootstrap",
+			"WorldDataAgentContracts",
+			"WorldDataAgentUI",
 			"WorkspaceMenuStructure",
 			"UnrealEd"
 		});

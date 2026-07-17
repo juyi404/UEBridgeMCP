@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "WorldDataMCPServer.h"
+#include "WorldDataMCPCommon.h"
 
 class UEBRIDGEMCPCORE_API IWorldDataMCPService
 {
@@ -31,6 +31,7 @@ public:
 	virtual FString GetConnectionFilePath() const = 0;
 	virtual bool IsUnsafePythonEnabled() const = 0;
 	virtual FString GetUnsafePythonCapabilityToken() const = 0;
+	virtual bool ValidateUnsafePythonCapability(const FString& Candidate) const = 0;
 	virtual void RefreshConnectionFiles() = 0;
 	virtual void ProvisionClientConfigurations() = 0;
 	virtual bool RotateAccessToken(FString& OutError) = 0;
