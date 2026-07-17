@@ -42,6 +42,7 @@ namespace
 		Json->SetStringField(TEXT("workingDirectory"), Thread.WorkingDirectory);
 		Json->SetNumberField(TEXT("createdAt"), static_cast<double>(Thread.CreatedAt));
 		Json->SetNumberField(TEXT("updatedAt"), static_cast<double>(Thread.UpdatedAt));
+		Json->SetNumberField(TEXT("recencyAt"), static_cast<double>(Thread.RecencyAt));
 		Json->SetStringField(TEXT("status"), Thread.Status);
 		return Json;
 	}

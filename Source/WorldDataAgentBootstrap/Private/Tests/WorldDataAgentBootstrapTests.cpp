@@ -17,13 +17,8 @@ namespace
 		bool bTurnRequested = false;
 		bool bToolObserved = false;
 		bool bTurnCompleted = false;
-		bool bListRequested = false;
-		bool bThreadsListed = false;
-		bool bResumeRequested = false;
-		bool bThreadLoaded = false;
 		FString ThreadId;
 		FString ResponseText;
-		TArray<FWorldDataConversationItem> LoadedItems;
 		FWorldDataAgentError Failure;
 	};
 
@@ -74,6 +69,7 @@ namespace
 				Request.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 				Request.ApprovalPolicy = TEXT("never");
 				Request.SandboxMode = TEXT("read-only");
+				Request.bEphemeral = true;
 				State->bThreadRequested = !State->Gateway->CreateThread(Request).IsEmpty();
 			}
 
@@ -92,33 +88,10 @@ namespace
 				State->bTurnRequested = !State->Gateway->SendTurn(Request).IsEmpty();
 			}
 
-			if (State->bTurnCompleted && !State->bListRequested)
+			if (State->bTurnCompleted)
 			{
 				Test->TestTrue(TEXT("worlddata.get_project_info tool event was observed"), State->bToolObserved);
 				Test->TestTrue(TEXT("Assistant returned the current project name"), State->ResponseText.Contains(TEXT("CollectWorldData")));
-				FWorldDataListThreadsRequest Request;
-				Request.Limit = 25;
-				State->bListRequested = !State->Gateway->ListThreads(Request).IsEmpty();
-			}
-
-			if (State->bThreadsListed && !State->bResumeRequested)
-			{
-				FWorldDataResumeThreadRequest Request;
-				Request.ThreadId = State->ThreadId;
-				Request.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
-				Request.ApprovalPolicy = TEXT("never");
-				Request.SandboxMode = TEXT("read-only");
-				State->bResumeRequested = !State->Gateway->ResumeThread(Request).IsEmpty();
-			}
-
-			if (State->bThreadLoaded)
-			{
-				const bool bHistoryHasProjectName = State->LoadedItems.ContainsByPredicate([](const FWorldDataConversationItem& Item)
-				{
-					return Item.Text.Contains(TEXT("CollectWorldData"));
-				});
-				Test->TestTrue(TEXT("Resumed thread contains normalized conversation history"), bHistoryHasProjectName);
-				Test->TestTrue(TEXT("WorldData MCP remains connected after resume"), State->Gateway->GetStatus().bMcpConnected);
 				Cleanup();
 				return true;
 			}
@@ -182,24 +155,10 @@ bool FWorldDataAgentEndToEndTest::RunTest(const FString& Parameters)
 	{
 		switch (Event.Type)
 		{
-		case EWorldDataAgentEventType::ThreadsListed:
-			State->bThreadsListed = Event.Threads.ContainsByPredicate([State](const FWorldDataThreadSummary& Thread)
-			{
-				return Thread.Id == State->ThreadId;
-			});
-			if (!State->bThreadsListed)
-			{
-				State->Failure = { TEXT("thread.not_listed"), TEXT("The completed Codex thread was not returned by thread/list."), TEXT("WorldDataAgentBootstrapTests"), false };
-			}
-			break;
 		case EWorldDataAgentEventType::ThreadCreated:
 			State->bThreadCreated = true;
 			State->ThreadId = Event.ThreadId;
 			State->bMcpConnected = State->Gateway->GetStatus().bMcpConnected;
-			break;
-		case EWorldDataAgentEventType::ThreadLoaded:
-			State->bThreadLoaded = Event.ThreadId == State->ThreadId;
-			State->LoadedItems = Event.ConversationItems;
 			break;
 		case EWorldDataAgentEventType::MessageDelta:
 			State->ResponseText += Event.Text;

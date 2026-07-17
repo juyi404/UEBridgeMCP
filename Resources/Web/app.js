@@ -119,6 +119,16 @@
     return new Date(timestamp * 1000).toLocaleDateString("zh-CN", {month:"numeric", day:"numeric"});
   }
 
+  function threadTimestamp(thread) {
+    return Number(thread.recencyAt || thread.updatedAt || thread.createdAt || 0);
+  }
+
+  function compareThreadsByRecency(left, right) {
+    return threadTimestamp(right) - threadTimestamp(left)
+      || Number(right.updatedAt || 0) - Number(left.updatedAt || 0)
+      || String(left.id || "").localeCompare(String(right.id || ""));
+  }
+
   function renderConnection(next) {
     const connection = next.connection;
     elements.connectionLine.className = `top-server-connection ${connection.state === "ready" ? "" : "is-offline"}`;
@@ -132,11 +142,13 @@
   }
 
   function renderThreads(next) {
+    const orderedThreads = [...next.threads].sort(compareThreadsByRecency);
     elements.threadCount.textContent = `${next.threads.length} 个会话`;
-    elements.threadList.innerHTML = next.threads.map(thread => {
+    elements.threadList.innerHTML = orderedThreads.map(thread => {
       const title = thread.title || thread.preview || "新对话";
       const status = threadStatusLabel(thread.status);
-      return `<button class="conversation" type="button" aria-current="${thread.id === next.activeThreadId ? "page" : "false"}" data-thread-id="${escapeHtml(thread.id)}" title="${escapeHtml(status || title)}"><span class="conversation__title">${escapeHtml(title)}</span><span class="conversation__age">${relativeTime(thread.updatedAt)}</span></button>`;
+      const tooltip = status ? `${title} · ${status}` : title;
+      return `<button class="conversation" type="button" aria-current="${thread.id === next.activeThreadId ? "page" : "false"}" data-thread-id="${escapeHtml(thread.id)}" title="${escapeHtml(tooltip)}"><span class="conversation__title">${escapeHtml(title)}</span><span class="conversation__age">${relativeTime(threadTimestamp(thread))}</span></button>`;
     }).join("") || `<div class="conversation-empty">暂无本项目会话</div>`;
   }
 

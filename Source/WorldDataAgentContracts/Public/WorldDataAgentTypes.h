@@ -112,6 +112,7 @@ struct FWorldDataCreateThreadRequest
 	FString Model;
 	FString ApprovalPolicy;
 	FString SandboxMode;
+	bool bEphemeral = false;
 };
 
 struct FWorldDataListThreadsRequest
@@ -137,6 +138,7 @@ struct FWorldDataThreadSummary
 	FString WorkingDirectory;
 	int64 CreatedAt = 0;
 	int64 UpdatedAt = 0;
+	int64 RecencyAt = 0;
 	FString Status;
 };
 

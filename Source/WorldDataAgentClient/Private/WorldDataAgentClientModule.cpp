@@ -42,10 +42,13 @@ namespace
 		Object->TryGetStringField(TEXT("status"), OutThread.Status);
 		double CreatedAt = 0.0;
 		double UpdatedAt = 0.0;
+		double RecencyAt = 0.0;
 		Object->TryGetNumberField(TEXT("createdAt"), CreatedAt);
 		Object->TryGetNumberField(TEXT("updatedAt"), UpdatedAt);
+		Object->TryGetNumberField(TEXT("recencyAt"), RecencyAt);
 		OutThread.CreatedAt = static_cast<int64>(CreatedAt);
 		OutThread.UpdatedAt = static_cast<int64>(UpdatedAt);
+		OutThread.RecencyAt = static_cast<int64>(RecencyAt);
 		return true;
 	}
 
@@ -195,6 +198,7 @@ namespace
 			if (!Request.Model.IsEmpty()) Payload->SetStringField(TEXT("model"), Request.Model);
 			if (!Request.ApprovalPolicy.IsEmpty()) Payload->SetStringField(TEXT("approvalPolicy"), Request.ApprovalPolicy);
 			if (!Request.SandboxMode.IsEmpty()) Payload->SetStringField(TEXT("sandboxMode"), Request.SandboxMode);
+			Payload->SetBoolField(TEXT("ephemeral"), Request.bEphemeral);
 			return SendCommand(TEXT("createThread"), Payload);
 		}
 
