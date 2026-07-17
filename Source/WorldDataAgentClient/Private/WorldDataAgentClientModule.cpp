@@ -39,6 +39,7 @@ namespace
 		Object->TryGetStringField(TEXT("title"), OutThread.Title);
 		Object->TryGetStringField(TEXT("preview"), OutThread.Preview);
 		Object->TryGetStringField(TEXT("workingDirectory"), OutThread.WorkingDirectory);
+		Object->TryGetStringField(TEXT("threadSource"), OutThread.ThreadSource);
 		Object->TryGetStringField(TEXT("status"), OutThread.Status);
 		double CreatedAt = 0.0;
 		double UpdatedAt = 0.0;

@@ -139,6 +139,7 @@ struct FWorldDataThreadSummary
 	int64 CreatedAt = 0;
 	int64 UpdatedAt = 0;
 	int64 RecencyAt = 0;
+	FString ThreadSource;
 	FString Status;
 };
 
