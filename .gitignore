@@ -1,0 +1,20 @@
+# Unreal-generated files
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# Keep the distributable Agent Host, but not other build output or symbols.
+Binaries/*
+!Binaries/Win64/
+!Binaries/Win64/AgentHost/
+!Binaries/Win64/AgentHost/worlddata-agent-host.exe
+Binaries/Win64/AgentHost/*.pdb
+
+# .NET build output
+**/bin/
+**/obj/
+
+# Local IDE files
+.vs/
+.idea/
+*.suo

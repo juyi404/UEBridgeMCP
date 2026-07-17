@@ -4,6 +4,39 @@
 
 项目的目标不是让模型直接拥有编辑器权限，而是在“模型意图”和“编辑器变更”之间建立一条可验证、可审批、可追踪的本地链路。插件当前定位为 Windows 上的 Unreal Editor Beta 集成。
 
+## 快速开始（Windows）
+
+此仓库现在包含运行插件所需的 Agent Host 源码和已发布的 Windows x64 可执行文件：
+
+- `Binaries/Win64/AgentHost/worlddata-agent-host.exe`：自包含的 Agent Host 发布物，可被插件自动发现。
+- `Programs/WorldDataAgentHost/`：Host 的 .NET 8 源码、IPC 协议、探针与模块边界测试。
+
+仍需由使用者提供的依赖是 Windows、兼容的 Unreal Editor 项目，以及本机已安装的 Codex。Agent Host 是自包含发布物，不需要额外安装 .NET 运行时；但它会启动并连接本机 Codex app-server。
+
+### 安装与首次运行
+
+1. 将仓库克隆到 Unreal 项目的 `Plugins/UEBridgeMCP` 目录。
+2. 生成项目文件并编译 Editor 目标，然后在 Unreal 中启用插件及 `UEBridgeMCP.uplugin` 声明的依赖插件。
+3. 安装并登录 Codex；启动编辑器后，从 **Window** 菜单打开 WorldData MCP 控制台。
+4. 在控制台执行运行时配置。插件会验证并将内置的 Agent Host 与本机 Codex 放入项目 `Saved/UEBridgeMCP/Runtime` 下的受管运行时目录。
+
+### 从源码重新发布 Agent Host
+
+在仓库根目录执行下列命令，会重新生成插件自动发现的单文件 Windows x64 版本：
+
+```powershell
+dotnet publish .\Programs\WorldDataAgentHost\WorldData.AgentHost.App\WorldData.AgentHost.App.csproj `
+  -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -p:PublishTrimmed=false `
+  -o .\Binaries\Win64\AgentHost
+```
+
+发布后可用下列命令确认二进制可执行：
+
+```powershell
+.\Binaries\Win64\AgentHost\worlddata-agent-host.exe --version
+```
+
 ## 设计思路
 
 ### 1. 编辑器优先的本地闭环

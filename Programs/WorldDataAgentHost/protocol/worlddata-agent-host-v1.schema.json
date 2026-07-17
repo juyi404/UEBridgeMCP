@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://worlddata.local/schemas/agent-host-v1.json",
+  "title": "WorldData Agent Host IPC v1",
+  "oneOf": [
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "command": {
+      "oneOf": [
+        { "$ref": "#/$defs/connectCommand" },
+        { "$ref": "#/$defs/createThreadCommand" },
+        { "$ref": "#/$defs/listThreadsCommand" },
+        { "$ref": "#/$defs/resumeThreadCommand" },
+        { "$ref": "#/$defs/readThreadCommand" },
+        { "$ref": "#/$defs/sendTurnCommand" },
+        { "$ref": "#/$defs/interruptTurnCommand" },
+        { "$ref": "#/$defs/resolveApprovalCommand" },
+        { "$ref": "#/$defs/shutdownCommand" }
+      ]
+    },
+    "commandType": {
+      "enum": ["connect", "createThread", "listThreads", "resumeThread", "readThread", "sendTurn", "interruptTurn", "resolveApproval", "shutdown"]
+    },
+    "commandEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "id", "type", "payload"],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "$ref": "#/$defs/commandType" },
+        "payload": { "type": "object" }
+      }
+    },
+    "connectCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "connect" }, "payload": { "$ref": "#/$defs/connectPayload" } } }
+      ]
+    },
+    "createThreadCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "createThread" }, "payload": { "$ref": "#/$defs/createThreadPayload" } } }
+      ]
+    },
+    "listThreadsCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "listThreads" }, "payload": { "$ref": "#/$defs/listThreadsPayload" } } }
+      ]
+    },
+    "resumeThreadCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "resumeThread" }, "payload": { "$ref": "#/$defs/resumeThreadPayload" } } }
+      ]
+    },
+    "readThreadCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "readThread" }, "payload": { "$ref": "#/$defs/readThreadPayload" } } }
+      ]
+    },
+    "sendTurnCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "sendTurn" }, "payload": { "$ref": "#/$defs/sendTurnPayload" } } }
+      ]
+    },
+    "interruptTurnCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "interruptTurn" }, "payload": { "$ref": "#/$defs/interruptTurnPayload" } } }
+      ]
+    },
+    "resolveApprovalCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "resolveApproval" }, "payload": { "$ref": "#/$defs/resolveApprovalPayload" } } }
+      ]
+    },
+    "shutdownCommand": {
+      "allOf": [
+        { "$ref": "#/$defs/commandEnvelope" },
+        { "properties": { "type": { "const": "shutdown" }, "payload": { "$ref": "#/$defs/emptyPayload" } } }
+      ]
+    },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "nullableString": { "type": ["string", "null"] },
+    "connectPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codexExecutable", "projectRoot", "mcpUrl", "clientVersion"],
+      "properties": {
+        "codexExecutable": { "$ref": "#/$defs/nonEmptyString" },
+        "projectRoot": { "$ref": "#/$defs/nonEmptyString" },
+        "mcpUrl": { "$ref": "#/$defs/nonEmptyString" },
+        "clientVersion": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "createThreadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clientConversationId", "workingDirectory"],
+      "properties": {
+        "clientConversationId": { "$ref": "#/$defs/nonEmptyString" },
+        "workingDirectory": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nullableString" },
+        "approvalPolicy": { "$ref": "#/$defs/nullableString" },
+        "sandboxMode": { "$ref": "#/$defs/nullableString" },
+        "ephemeral": { "type": "boolean" }
+      }
+    },
+    "listThreadsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": { "$ref": "#/$defs/nullableString" },
+        "limit": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "resumeThreadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threadId", "workingDirectory"],
+      "properties": {
+        "threadId": { "$ref": "#/$defs/nonEmptyString" },
+        "workingDirectory": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nullableString" },
+        "approvalPolicy": { "$ref": "#/$defs/nullableString" },
+        "sandboxMode": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "readThreadPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threadId"],
+      "properties": { "threadId": { "$ref": "#/$defs/nonEmptyString" } }
+    },
+    "sendTurnPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threadId", "clientTurnId", "text"],
+      "properties": {
+        "threadId": { "$ref": "#/$defs/nonEmptyString" },
+        "clientTurnId": { "$ref": "#/$defs/nonEmptyString" },
+        "text": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "interruptTurnPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["threadId", "turnId"],
+      "properties": {
+        "threadId": { "$ref": "#/$defs/nonEmptyString" },
+        "turnId": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "resolveApprovalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "approved"],
+      "properties": {
+        "requestId": { "$ref": "#/$defs/nonEmptyString" },
+        "approved": { "type": "boolean" }
+      }
+    },
+    "emptyPayload": { "type": "object", "maxProperties": 0 },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolVersion", "type"],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "requestId": { "type": ["string", "null"] },
+        "payload": { "type": ["object", "null"] }
+      }
+    }
+  }
+}
