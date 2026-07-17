@@ -11,6 +11,16 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "UEBridgeMCPCore",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "UEBridgeMCPTools",
+			"Type": "EditorNoCommandlet",
+			"LoadingPhase": "Default"
+		},
+		{
 			"Name": "UEBridgeMCPEditor",
 			"Type": "EditorNoCommandlet",
 			"LoadingPhase": "PostEngineInit"

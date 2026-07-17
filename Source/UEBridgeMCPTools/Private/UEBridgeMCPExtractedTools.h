@@ -9,10 +9,6 @@ namespace WorldDataMCP
 namespace ExtractedTools
 {
 	FString GetToolDefinitionsJson();
-	bool Dispatch(const FString& ToolName, const TSharedPtr<FJsonObject>& Args, FString& OutResult);
-
-	FString ListResources();
-	FString ReadResource(const TSharedPtr<FJsonObject>& Args);
 	FString ReadLog(const TSharedPtr<FJsonObject>& Args);
 	FString ExecutePython(const TSharedPtr<FJsonObject>& Args);
 

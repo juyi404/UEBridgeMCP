@@ -3,16 +3,8 @@
 #include "Algo/AllOf.h"
 #include "Async/Async.h"
 #include "Async/Future.h"
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Editor.h"
-#include "Engine/Blueprint.h"
-#include "Engine/StaticMesh.h"
-#include "Engine/StaticMeshActor.h"
-#include "Engine/World.h"
-#include "EngineUtils.h"
 #include "HAL/Event.h"
 #include "HAL/CriticalSection.h"
 #include "HAL/FileManager.h"
@@ -31,13 +23,9 @@
 #include "Misc/ScopeLock.h"
 #include "Misc/SecureHash.h"
 #include "Modules/ModuleManager.h"
-#include "ScopedTransaction.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
-#include "UObject/SoftObjectPath.h"
-#include "UObject/Package.h"
-#include "UObject/UObjectGlobals.h"
 
 #include <atomic>
 
@@ -53,8 +41,7 @@
 #include "WorldDataMCPCommon.h"
 #include "WorldDataMCPResponseContext.h"
 #include "WorldDataMCPToolGovernance.h"
-#include "WorldDataMCPTools.h"
-#include "UEBridgeMCPExtractedTools.h"
+#include "WorldDataMCPToolRegistry.h"
 
 using namespace WorldDataMCP;
 
@@ -114,7 +101,7 @@ namespace
 		auto InspectIpv4 = [&]() -> bool
 		{
 			DWORD BufferSize = 0;
-			DWORD Result = GetExtendedTcpTable(nullptr, &BufferSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+			DWORD Result = GetExtendedTcpTable(nullptr, &BufferSize, 1, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
 			if (Result != ERROR_INSUFFICIENT_BUFFER)
 			{
 				OutError = FString::Printf(TEXT("GetExtendedTcpTable(AF_INET) failed with %lu."), Result);
@@ -123,7 +110,7 @@ namespace
 
 			TArray<uint8> Buffer;
 			Buffer.SetNumUninitialized(BufferSize);
-			Result = GetExtendedTcpTable(Buffer.GetData(), &BufferSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+			Result = GetExtendedTcpTable(Buffer.GetData(), &BufferSize, 1, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
 			if (Result != NO_ERROR)
 			{
 				OutError = FString::Printf(TEXT("GetExtendedTcpTable(AF_INET) failed with %lu."), Result);
@@ -152,7 +139,7 @@ namespace
 		auto InspectIpv6 = [&]() -> bool
 		{
 			DWORD BufferSize = 0;
-			DWORD Result = GetExtendedTcpTable(nullptr, &BufferSize, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_LISTENER, 0);
+			DWORD Result = GetExtendedTcpTable(nullptr, &BufferSize, 1, AF_INET6, TCP_TABLE_OWNER_PID_LISTENER, 0);
 			if (Result == ERROR_NO_DATA)
 			{
 				return true;
@@ -165,7 +152,7 @@ namespace
 
 			TArray<uint8> Buffer;
 			Buffer.SetNumUninitialized(BufferSize);
-			Result = GetExtendedTcpTable(Buffer.GetData(), &BufferSize, TRUE, AF_INET6, TCP_TABLE_OWNER_PID_LISTENER, 0);
+			Result = GetExtendedTcpTable(Buffer.GetData(), &BufferSize, 1, AF_INET6, TCP_TABLE_OWNER_PID_LISTENER, 0);
 			if (Result != NO_ERROR)
 			{
 				OutError = FString::Printf(TEXT("GetExtendedTcpTable(AF_INET6) failed with %lu."), Result);
@@ -383,23 +370,11 @@ namespace
 
 	static FString CaptureWorldRevision()
 	{
-		UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (!World)
+		FString Revision = WorldDataMCP::FContextRegistry::Get().CaptureWorldRevision();
+		if (Revision.IsEmpty())
 		{
-			return TEXT("unavailable");
+			Revision = TEXT("unavailable");
 		}
-
-		int32 ActorCount = 0;
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			++ActorCount;
-		}
-		const FString Snapshot = FString::Printf(
-			TEXT("world=%s|packageDirty=%d|actorCount=%d"),
-			*World->GetPathName(),
-			World->GetOutermost() && World->GetOutermost()->IsDirty() ? 1 : 0,
-			ActorCount);
-		const FString Revision = MakeNonSecretHash(Snapshot);
 		{
 			FScopeLock Lock(&GMcpContextMutex);
 			GLastKnownWorldRevision = Revision;
@@ -436,83 +411,14 @@ namespace
 		return Parts.IsEmpty() ? TEXT("target not provided") : FString::Join(Parts, TEXT(", "));
 	}
 
-	static FString CaptureApprovalTargetRevision(const FString& /*ToolName*/, const TSharedPtr<FJsonObject>& Arguments)
+	static FString CaptureApprovalTargetRevision(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments)
 	{
-		// Snapshot only stable identifiers and a small target/world state. The same
-		// snapshot is recalculated immediately before the approved job executes.
-		TArray<FString> Snapshot;
-		// Object revision is deliberately tool-independent so a read such as
-		// get_actor_details can provide the precondition for transform_actor.
-		Snapshot.Add(MakeApprovalTargetSummary(Arguments));
-
-		UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-		if (!World)
+		FString Revision = WorldDataMCP::FContextRegistry::Get().CaptureTargetRevision(ToolName, Arguments);
+		if (!Revision.IsEmpty())
 		{
-			Snapshot.Add(TEXT("world=unavailable"));
-			return MakeNonSecretHash(FString::Join(Snapshot, TEXT("|")));
+			return Revision;
 		}
-
-		Snapshot.Add(FString::Printf(TEXT("world=%s"), *World->GetPathName()));
-		Snapshot.Add(FString::Printf(TEXT("packageDirty=%d"), World->GetOutermost() && World->GetOutermost()->IsDirty() ? 1 : 0));
-		int32 ActorCount = 0;
-		for (TActorIterator<AActor> It(World); It; ++It)
-		{
-			++ActorCount;
-		}
-		Snapshot.Add(FString::Printf(TEXT("actorCount=%d"), ActorCount));
-
-		if (Arguments.IsValid())
-		{
-			static const TCHAR* const ActorFields[] = { TEXT("name"), TEXT("child_name"), TEXT("parent_name") };
-			for (const TCHAR* Field : ActorFields)
-			{
-				FString Selector;
-				if (!Arguments->TryGetStringField(Field, Selector) || Selector.IsEmpty())
-				{
-					continue;
-				}
-
-				bool bFound = false;
-				for (TActorIterator<AActor> It(World); It; ++It)
-				{
-					AActor* Actor = *It;
-					if (Actor && (Actor->GetName().Equals(Selector, ESearchCase::IgnoreCase)
-						|| Actor->GetActorLabel().Equals(Selector, ESearchCase::IgnoreCase)))
-					{
-						Snapshot.Add(FString::Printf(TEXT("%s=%s:%s:%s"), Field, *Actor->GetPathName(), *Actor->GetClass()->GetPathName(), *Actor->GetActorTransform().ToHumanReadableString()));
-						bFound = true;
-						break;
-					}
-				}
-				if (!bFound)
-				{
-					Snapshot.Add(FString::Printf(TEXT("%s=missing:%s"), Field, *Selector));
-				}
-			}
-
-			static const TCHAR* const AssetFields[] = { TEXT("assetPath"), TEXT("path"), TEXT("old_path"), TEXT("new_path") };
-			for (const TCHAR* Field : AssetFields)
-			{
-				FString Selector;
-				if (!Arguments->TryGetStringField(Field, Selector) || Selector.IsEmpty())
-				{
-					continue;
-				}
-				const FSoftObjectPath ObjectPath(Selector);
-				if (UObject* Object = ObjectPath.ResolveObject())
-				{
-					UPackage* Package = Object->GetOutermost();
-					Snapshot.Add(FString::Printf(TEXT("%s=%s:%s:packageDirty=%d"), Field, *Object->GetPathName(), *Object->GetClass()->GetPathName(), Package && Package->IsDirty() ? 1 : 0));
-				}
-				else
-				{
-					Snapshot.Add(FString::Printf(TEXT("%s=unloaded:%s"), Field, *Selector));
-				}
-			}
-		}
-
-		Snapshot.Sort();
-		return MakeNonSecretHash(FString::Join(Snapshot, TEXT("|")));
+		return MakeNonSecretHash(MakeApprovalTargetSummary(Arguments) + TEXT("|") + GetCachedWorldRevision());
 	}
 
 	static void CompleteToolJob(const TSharedRef<FToolJob, ESPMode::ThreadSafe>& Job, const FString& ResultJson)
@@ -900,7 +806,7 @@ namespace
 			Envelope->SetStringField(TEXT("approvalId"), Id);
 		}
 		Result->SetObjectField(TEXT("contextEnvelope"), Envelope);
-		return JsonObjectToString(Result);
+		return JsonObjectToString(Result.ToSharedRef());
 	}
 
 	static WorldDataMCP::ToolGovernance::FCallerContext ExtractCallerContext(const TSharedPtr<FJsonObject>& Arguments)
@@ -1073,7 +979,7 @@ namespace
 		TArray<TSharedPtr<FJsonValue>> MergedTools;
 		TSet<FString> SeenToolNames;
 		AppendToolDefinitionsFromJson(LocalToolsJson, MergedTools, SeenToolNames);
-		AppendToolDefinitionsFromJson(WorldDataMCP::ExtractedTools::GetToolDefinitionsJson(), MergedTools, SeenToolNames);
+		AppendToolDefinitionsFromJson(WorldDataMCP::FToolRegistry::Get().GetRegisteredDefinitionsJson(), MergedTools, SeenToolNames);
 
 		FString Out;
 		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
@@ -1381,6 +1287,16 @@ namespace
 	}
 }
 
+static FString DispatchRegisteredTool(const FString& ToolName, const TSharedPtr<FJsonObject>& Args)
+{
+	FString Result;
+	if (WorldDataMCP::FToolRegistry::Get().Dispatch(ToolName, Args, Result))
+	{
+		return Result;
+	}
+	return ErrorJson(FString::Printf(TEXT("No registered UEBridgeMCP tool handler: %s"), *ToolName));
+}
+
 void FWorldDataMCPServer::Start(int32 Port)
 {
 	if (bRunning)
@@ -1403,6 +1319,7 @@ void FWorldDataMCPServer::Start(int32 Port)
 		UnsafePythonCapabilityToken = GenerateAccessToken();
 		UnsafePythonCapabilityExpiresAtUtc = FDateTime::UtcNow() + FTimespan::FromMinutes(GUnsafePythonCapabilityLifetimeMinutes);
 	}
+
 	{
 		FScopeLock JobLock(&GMcpJobMutex);
 		GToolJobs.Reset();
@@ -1886,104 +1803,45 @@ void FWorldDataMCPServer::ProvisionClientConfigurations()
 
 FString FWorldDataMCPServer::GetToolDefinitionsJson()
 {
-	static const FString LocalToolsJson = FString(TEXT(R"JSON([
-{"name":"get_current_project_info","description":"Return the UE project identity and MCP endpoint for this editor session.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Get Project Info","readOnlyHint":true,"openWorldHint":false}},
-{"name":"list_level_actors","description":"List actors in the currently loaded editor world with transforms, folder, mobility, and selection state.","inputSchema":{"type":"object","properties":{"classFilter":{"type":"string","description":"Optional case-insensitive class-name substring."},"nameContains":{"type":"string","description":"Optional case-insensitive actor name or label substring."},"selectedOnly":{"type":"boolean","description":"When true, only return currently selected actors."},"maxResults":{"type":"number","description":"Maximum returned actors. Default 200, capped at 1000."}}},"annotations":{"title":"List Level Actors","readOnlyHint":true,"openWorldHint":false}},
-{"name":"get_selected_actors","description":"Return the actors currently selected in the editor viewport/outliner.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Get Selected Actors","readOnlyHint":true,"openWorldHint":false}},
-{"name":"get_actor_details","description":"Read one actor in depth: transform, tags, and its components with classes and relative transforms.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Actor name or editor label."},"label":{"type":"string","description":"Alias for name."}},"required":["name"]},"annotations":{"title":"Get Actor Details","readOnlyHint":true,"openWorldHint":false}},
-{"name":"find_assets","description":"Search assets under a content path without loading them.","inputSchema":{"type":"object","properties":{"searchTerm":{"type":"string","description":"Optional case-insensitive asset name or path substring."},"classFilter":{"type":"string","description":"Optional class-name substring such as StaticMesh, Blueprint, World, Material."},"path":{"type":"string","description":"Content root to search. Default /Game."},"maxResults":{"type":"number","description":"Maximum returned assets. Default 50, capped at 500."}}},"annotations":{"title":"Find Assets","readOnlyHint":true,"openWorldHint":false}},
-{"name":"read_asset","description":"Read basic Asset Registry metadata for one asset.","inputSchema":{"type":"object","properties":{"assetPath":{"type":"string","description":"Asset object path or package path, for example /Game/Foo/Bar.Bar or /Game/Foo/Bar."}},"required":["assetPath"]},"annotations":{"title":"Read Asset","readOnlyHint":true,"openWorldHint":false}},
-{"name":"get_content_summary","description":"Summarize the Asset Registry under a content path: total asset count and a histogram of asset counts by class.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Content root to summarize. Default /Game."},"maxClasses":{"type":"number","description":"Maximum class buckets returned. Default 30, capped at 200."}}},"annotations":{"title":"Get Content Summary","readOnlyHint":true,"openWorldHint":false}},
-{"name":"select_actor","description":"Select an actor in the editor by name or label.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Actor name or editor label."},"label":{"type":"string","description":"Alias for name."}}},"annotations":{"title":"Select Actor","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
-{"name":"spawn_actor","description":"Spawn an actor into the current editor world. Use staticMeshPath to create a StaticMeshActor.","inputSchema":{"type":"object","properties":{"class":{"type":"string","description":"Actor class name/path. Default Actor. Blueprint asset paths are supported."},"staticMeshPath":{"type":"string","description":"Optional StaticMesh asset path. When supplied, spawns a StaticMeshActor."},"label":{"type":"string","description":"Optional editor label."},"location":{"type":"object","description":"Object {x,y,z} or array [x,y,z]."},"rotation":{"type":"object","description":"Object {pitch,yaw,roll} or array [pitch,yaw,roll]."},"scale":{"type":"object","description":"Object {x,y,z} or array [x,y,z]."}}},"annotations":{"title":"Spawn Actor","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}},
-)JSON")) + TEXT(R"JSON(
-{"name":"transform_actor","description":"Set an actor world transform by name or label.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Actor name or editor label."},"label":{"type":"string","description":"Alias for name."},"location":{"type":"object","description":"Object {x,y,z} or array [x,y,z]."},"rotation":{"type":"object","description":"Object {pitch,yaw,roll} or array [pitch,yaw,roll]."},"scale":{"type":"object","description":"Object {x,y,z} or array [x,y,z]."}},"required":["name"]},"annotations":{"title":"Transform Actor","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
-{"name":"delete_actor","description":"Delete an actor from the current editor world by name or label.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Actor name or editor label."},"label":{"type":"string","description":"Alias for name."}},"required":["name"]},"annotations":{"title":"Delete Actor","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"attach_actor","description":"Attach one actor to another in the editor world.","inputSchema":{"type":"object","properties":{"child":{"type":"string","description":"Child actor name or label."},"childName":{"type":"string"},"parent":{"type":"string","description":"Parent actor name or label."},"parentName":{"type":"string"},"socket":{"type":"string"},"keepWorldTransform":{"type":"boolean","description":"Default true."}},"required":["child","parent"]},"annotations":{"title":"Attach Actor","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
-{"name":"set_actor_property","description":"Set an editable actor or component property using reflection. Supports primitive values, enum names, FVector, FRotator, FLinearColor, and UObject asset references.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Actor name or editor label."},"label":{"type":"string","description":"Alias for name."},"component":{"type":"string","description":"Optional component name or class name."},"property":{"type":"string","description":"Property name."},"value":{"description":"JSON value compatible with the property type."}},"required":["name","property","value"]},"annotations":{"title":"Set Actor Property","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
-{"name":"save_current_level","description":"Save the current level package to disk.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Save Current Level","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"create_asset","description":"Create a UObject asset under /Game with the supplied class. Useful for simple data assets and reflected asset classes such as PCGGraph.","inputSchema":{"type":"object","properties":{"assetPath":{"type":"string","description":"Long package path under /Game, for example /Game/MCP/NewAsset."},"path":{"type":"string","description":"Alias for assetPath."},"class":{"type":"string","description":"UObject class name or path. Default DataAsset."},"save":{"type":"boolean","description":"When true, save the created asset package to disk."}},"required":["assetPath"]},"annotations":{"title":"Create Asset","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"create_blueprint_asset","description":"Create a Blueprint asset under /Game using a reflected parent class. Graph node construction is not exposed yet.","inputSchema":{"type":"object","properties":{"assetPath":{"type":"string","description":"Long package path under /Game."},"path":{"type":"string","description":"Alias for assetPath."},"parentClass":{"type":"string","description":"Parent class name/path. Default Actor."},"save":{"type":"boolean","description":"When true, save the created asset package to disk."}},"required":["assetPath"]},"annotations":{"title":"Create Blueprint Asset","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"modify_material_instance","description":"Modify scalar and vector parameters on a MaterialInstanceConstant asset.","inputSchema":{"type":"object","properties":{"assetPath":{"type":"string","description":"MaterialInstanceConstant object path or package path."},"path":{"type":"string","description":"Alias for assetPath."},"scalarParameters":{"type":"object","additionalProperties":{"type":"number"}},"vectorParameters":{"type":"object","description":"Map of parameter name to {r,g,b,a} object or [r,g,b,a] array."},"save":{"type":"boolean","description":"When true, save the modified asset package to disk."}},"required":["assetPath"]},"annotations":{"title":"Modify Material Instance","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"create_pcg_graph_from_recipe","description":"Create a PCGGraph asset under /Game from recipe metadata. If sourceGraph/source_graph is supplied, duplicates that existing PCGGraph including nodes and edges; otherwise creates an empty PCGGraph container and reports recipeApplied=false.","inputSchema":{"type":"object","properties":{"assetPath":{"type":"string","description":"PCGGraph package path under /Game."},"path":{"type":"string","description":"Alias for assetPath."},"recipe_id":{"type":"string"},"id":{"type":"string"},"sourceGraph":{"type":"string","description":"Optional source PCGGraph asset path to duplicate."},"source_graph":{"type":"string","description":"Alias for sourceGraph."},"recipe":{"type":"object","description":"Optional recipe object containing recipe_id/id and source_graph."},"save":{"type":"boolean","description":"When true, save the created graph asset package to disk."}},"required":["assetPath"]},"annotations":{"title":"Create PCG Graph From Recipe","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}},
-{"name":"get_mcp_governance","description":"Return the enforced UEBridgeMCP tool risk matrix, interactive-approval policy, and redacted audit-log location.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"MCP Governance","readOnlyHint":true,"openWorldHint":false}},
-{"name":"get_mcp_job_status","description":"Read the status and final structured result of an asynchronous MCP tool job. Mutating tools return a jobId and approvalId immediately, then remain awaiting_approval until the Unreal Editor user decides. Read-only long-running tools may use arguments.worlddataAsync=true.","inputSchema":{"type":"object","properties":{"jobId":{"type":"string","description":"Job identifier returned by an asynchronous or approval-gated tool call."}},"required":["jobId"]},"annotations":{"title":"Get MCP Job Status","readOnlyHint":true,"openWorldHint":false}},
-{"name":"get_codex_policy_snapshot","description":"Read a redacted snapshot of explicit local Codex policy: approval_policy, sandbox_mode, active profile, model, and non-secret MCP enablement/type metadata. Command lines, arguments, paths, URLs, environment values, hidden prompts, and runtime secrets are omitted.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Codex Policy Snapshot","readOnlyHint":true,"openWorldHint":false}}
-])JSON");
-	const FString WithResponseControl = WorldDataMCP::ResponseContext::AddResponseControlToToolDefinitions(BuildCombinedToolDefinitionsJson(LocalToolsJson));
+	const FString RegisteredDefinitions = WorldDataMCP::FToolRegistry::Get().GetRegisteredDefinitionsJson();
+	const FString WithResponseControl = WorldDataMCP::ResponseContext::AddResponseControlToToolDefinitions(RegisteredDefinitions);
 	return WorldDataMCP::ToolGovernance::AddGovernanceMetadataToToolDefinitions(WithResponseControl);
+}
+
+namespace
+{
+	void RegisterCoreResources()
+	{
+		auto& Resources = WorldDataMCP::FResourceRegistry::Get();
+		Resources.RegisterResource(TEXT("worlddata://project/info"), TEXT("Project Info"), TEXT("Project identity, paths, MCP endpoint, and process details."), []
+		{
+			return FWorldDataMCPServer::GetProjectInfoJson();
+		});
+		Resources.RegisterResource(TEXT("worlddata://mcp/governance"), TEXT("MCP Governance"), TEXT("Tool risk matrix, interactive approval policy, and audit-log metadata."), []
+		{
+			return WorldDataMCP::ToolGovernance::GetPolicySnapshotJson();
+		});
+		Resources.RegisterResource(TEXT("worlddata://codex/policy-snapshot"), TEXT("Codex Policy Snapshot"), TEXT("Redacted local Codex config policy and MCP server configuration."), []
+		{
+			return GetCodexPolicySnapshotJson();
+		});
+	}
 }
 
 FString FWorldDataMCPServer::GetResourceListJson()
 {
-	TArray<TSharedPtr<FJsonValue>> Resources;
-	auto AddResource = [&Resources](const FString& Uri, const FString& Name, const FString& Description)
-	{
-		TSharedRef<FJsonObject> Resource = MakeShared<FJsonObject>();
-		Resource->SetStringField(TEXT("uri"), Uri);
-		Resource->SetStringField(TEXT("name"), Name);
-		Resource->SetStringField(TEXT("description"), Description);
-		Resource->SetStringField(TEXT("mimeType"), TEXT("application/json"));
-		Resources.Add(MakeShared<FJsonValueObject>(Resource));
-	};
-
-	AddResource(TEXT("worlddata://context/bootstrap"), TEXT("Bootstrap Context"), TEXT("Recommended first-read order and compact editor state."));
-	AddResource(TEXT("worlddata://project/info"), TEXT("Project Info"), TEXT("Project identity, paths, MCP endpoint, and process details."));
-	AddResource(TEXT("worlddata://mcp/governance"), TEXT("MCP Governance"), TEXT("Tool risk matrix, interactive approval policy, and audit-log metadata."));
-	AddResource(TEXT("worlddata://codex/policy-snapshot"), TEXT("Codex Policy Snapshot"), TEXT("Redacted local Codex config policy and MCP server configuration."));
-	AddResource(TEXT("worlddata://level/actors"), TEXT("Level Actors"), TEXT("Current editor-world actors, labels, classes, and transforms."));
-	AddResource(TEXT("worlddata://editor/selection"), TEXT("Editor Selection"), TEXT("Actors currently selected in the editor."));
-	AddResource(TEXT("worlddata://content/assets"), TEXT("Content Assets"), TEXT("Compact asset registry survey under /Game."));
-	AddResource(TEXT("worlddata://content/summary"), TEXT("Content Summary"), TEXT("Asset counts by class under /Game."));
-
-	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetStringField(TEXT("recommendedFirstRead"), TEXT("worlddata://context/bootstrap"));
-	Result->SetArrayField(TEXT("resources"), Resources);
-	return JsonObjectToString(Result);
+	RegisterCoreResources();
+	return WorldDataMCP::FResourceRegistry::Get().GetResourceListJson(TEXT("worlddata://context/bootstrap"));
 }
 
 FString FWorldDataMCPServer::ReadResource(const FString& Uri)
 {
-	if (Uri == TEXT("worlddata://context/bootstrap"))
+	RegisterCoreResources();
+	FString Result;
+	if (WorldDataMCP::FResourceRegistry::Get().Read(Uri, Result))
 	{
-		return WorldDataMCP::Tools::GetBootstrapContextJson();
+		return Result;
 	}
-	if (Uri == TEXT("worlddata://project/info"))
-	{
-		return GetProjectInfoJson();
-	}
-	if (Uri == TEXT("worlddata://mcp/governance"))
-	{
-		return WorldDataMCP::ToolGovernance::GetPolicySnapshotJson();
-	}
-	if (Uri == TEXT("worlddata://codex/policy-snapshot"))
-	{
-		return GetCodexPolicySnapshotJson();
-	}
-	if (Uri == TEXT("worlddata://level/actors"))
-	{
-		TSharedPtr<FJsonObject> Args = MakeShared<FJsonObject>();
-		Args->SetNumberField(TEXT("maxResults"), 300);
-		return WorldDataMCP::Tools::ListLevelActors(Args);
-	}
-	if (Uri == TEXT("worlddata://editor/selection"))
-	{
-		return WorldDataMCP::Tools::GetSelectedActors(MakeShared<FJsonObject>());
-	}
-	if (Uri == TEXT("worlddata://content/assets"))
-	{
-		TSharedPtr<FJsonObject> Args = MakeShared<FJsonObject>();
-		Args->SetStringField(TEXT("path"), TEXT("/Game"));
-		Args->SetNumberField(TEXT("maxResults"), 300);
-		return WorldDataMCP::Tools::FindAssets(Args);
-	}
-	if (Uri == TEXT("worlddata://content/summary"))
-	{
-		TSharedPtr<FJsonObject> Args = MakeShared<FJsonObject>();
-		Args->SetStringField(TEXT("path"), TEXT("/Game"));
-		return WorldDataMCP::Tools::GetContentSummary(Args);
-	}
-
 	return ErrorJson(FString::Printf(TEXT("Unknown resource: %s"), *Uri));
 }
 
@@ -2488,8 +2346,7 @@ FString FWorldDataMCPServer::GetServerInstructions()
 		"mutating tools (spawn_actor, transform_actor, delete_actor, attach_actor, set_actor_property, "
 		"save_current_level, create_asset, create_blueprint_asset, modify_material_instance, create_pcg_graph_from_recipe, select_actor) "
 		"only after you understand the scene. "
-		"UEBridgeMCP also includes standalone extracted tools such as list_resources, "
-		"read_resource, read_log, execute_python, project file tools, PIE controls, and PCG recipe tools. "
+		"UEBridgeMCP also includes supplemental tools such as read_log, execute_python, project file tools, PIE controls, and PCG recipe tools. "
 		"Every tool accepts an optional responseControl object: maxBytes (default 65536), pageSize (default 50), "
 		"cursor for a stable follow-up page, fields for top-level projection, and ifRevision for conditional read-only results. "
 		"Every tool result contains contextEnvelope. Before any mutating tool call, copy taskId, threadId, worldRevision, and objectRevision from a fresh relevant result into arguments.worlddataContext; stale or cross-session context is rejected server-side. "
@@ -2901,78 +2758,9 @@ FString FWorldDataMCPServer::DispatchTool(const FString& ToolName, const FString
 
 static FString DispatchAuthorizedTool(const FString& ToolName, const TSharedPtr<FJsonObject>& Args)
 {
-
 	if (ToolName == TEXT("get_current_project_info"))
 	{
 		return FWorldDataMCPServer::GetProjectInfoJson();
-	}
-	if (ToolName == TEXT("list_level_actors"))
-	{
-		return WorldDataMCP::Tools::ListLevelActors(Args);
-	}
-	if (ToolName == TEXT("get_selected_actors"))
-	{
-		return WorldDataMCP::Tools::GetSelectedActors(Args);
-	}
-	if (ToolName == TEXT("get_actor_details"))
-	{
-		return WorldDataMCP::Tools::GetActorDetails(Args);
-	}
-	if (ToolName == TEXT("find_assets"))
-	{
-		return WorldDataMCP::Tools::FindAssets(Args);
-	}
-	if (ToolName == TEXT("get_content_summary"))
-	{
-		return WorldDataMCP::Tools::GetContentSummary(Args);
-	}
-	if (ToolName == TEXT("read_asset"))
-	{
-		return WorldDataMCP::Tools::ReadAsset(Args);
-	}
-	if (ToolName == TEXT("select_actor"))
-	{
-		return WorldDataMCP::Tools::SelectActor(Args);
-	}
-	if (ToolName == TEXT("spawn_actor"))
-	{
-		return WorldDataMCP::Tools::SpawnActor(Args);
-	}
-	if (ToolName == TEXT("transform_actor"))
-	{
-		return WorldDataMCP::Tools::TransformActor(Args);
-	}
-	if (ToolName == TEXT("delete_actor"))
-	{
-		return WorldDataMCP::Tools::DeleteActor(Args);
-	}
-	if (ToolName == TEXT("attach_actor"))
-	{
-		return WorldDataMCP::Tools::AttachActor(Args);
-	}
-	if (ToolName == TEXT("set_actor_property"))
-	{
-		return WorldDataMCP::Tools::SetActorProperty(Args);
-	}
-	if (ToolName == TEXT("save_current_level"))
-	{
-		return WorldDataMCP::Tools::SaveCurrentLevel(Args);
-	}
-	if (ToolName == TEXT("create_asset"))
-	{
-		return WorldDataMCP::Tools::CreateAsset(Args);
-	}
-	if (ToolName == TEXT("create_blueprint_asset"))
-	{
-		return WorldDataMCP::Tools::CreateBlueprintAsset(Args);
-	}
-	if (ToolName == TEXT("modify_material_instance"))
-	{
-		return WorldDataMCP::Tools::ModifyMaterialInstance(Args);
-	}
-	if (ToolName == TEXT("create_pcg_graph_from_recipe"))
-	{
-		return WorldDataMCP::Tools::CreatePcgGraphFromRecipe(Args);
 	}
 	if (ToolName == TEXT("get_mcp_governance"))
 	{
@@ -2983,13 +2771,7 @@ static FString DispatchAuthorizedTool(const FString& ToolName, const TSharedPtr<
 		return GetCodexPolicySnapshotJson();
 	}
 
-	FString ExtractedResult;
-	if (WorldDataMCP::ExtractedTools::Dispatch(ToolName, Args, ExtractedResult))
-	{
-		return ExtractedResult;
-	}
-
-	return ErrorJson(FString::Printf(TEXT("Unknown UEBridgeMCP tool: %s"), *ToolName));
+	return DispatchRegisteredTool(ToolName, Args);
 }
 
 TSharedPtr<FJsonObject> FWorldDataMCPServer::MakeJsonRpcError(TSharedPtr<FJsonValue> Id, int32 Code, const FString& Message)

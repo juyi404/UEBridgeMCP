@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "WorldDataMCPServer.h"
+#include "UEBridgeMCPCoreModule.h"
 
 // One redaction path for every embedded Agent Backend. It is intentionally
 // applied before editor logs, UI transcript diagnostics, and stored errors.
@@ -35,7 +35,7 @@ namespace WorldDataAgentLogRedaction
 
 	inline FString Redact(FString Text)
 	{
-		const FString McpToken = FWorldDataMCPServer::GetAccessToken();
+		const FString McpToken = GetWorldDataMCPService().GetAccessToken();
 		if (!McpToken.IsEmpty()) Text.ReplaceInline(*McpToken, TEXT("[REDACTED_MCP_TOKEN]"), ESearchCase::CaseSensitive);
 		for (const TCHAR* Key : { TEXT("authorization"), TEXT("access_token"), TEXT("token"), TEXT("api_key"), TEXT("password"), TEXT("secret") })
 		{

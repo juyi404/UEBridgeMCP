@@ -7,7 +7,7 @@
 #include "WorldDataAgentBackend.h"
 #include "WorldDataCodexACPClient.h"
 #include "WorldDataCodexAppServerBackend.h"
-#include "WorldDataMCPServer.h"
+#include "UEBridgeMCPCoreModule.h"
 
 namespace
 {
@@ -69,18 +69,19 @@ namespace
 		{
 			return;
 		}
-		if (!FWorldDataMCPServer::IsRunning())
+		IWorldDataMCPService& Mcp = IUEBridgeMCPCoreModule::Get().GetService();
+		if (!Mcp.IsRunning())
 		{
-			FWorldDataMCPServer::Start(FWorldDataMCPServer::LoadConfiguredPort());
+			Mcp.StartConfigured();
 		}
 		FWorldDataAgentMcpConnection Connection;
-		Connection.bAvailable = FWorldDataMCPServer::IsRunning();
+		Connection.bAvailable = Mcp.IsRunning();
 		if (Connection.bAvailable)
 		{
-			Connection.ServerName = FWorldDataMCPServer::GetServerName();
-			Connection.Url = FWorldDataMCPServer::GetMcpUrl();
-			Connection.AccessTokenHeader = FWorldDataMCPServer::GetAccessTokenHeaderName();
-			Connection.AccessToken = FWorldDataMCPServer::GetAccessToken();
+			Connection.ServerName = Mcp.GetServerName();
+			Connection.Url = Mcp.GetMcpUrl();
+			Connection.AccessTokenHeader = Mcp.GetAccessTokenHeaderName();
+			Connection.AccessToken = Mcp.GetAccessToken();
 		}
 		Backend->ConfigureMcpConnection(Connection);
 	}

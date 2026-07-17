@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "WorldDataMCPServer.h"
+#include "UEBridgeMCPCoreModule.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
@@ -60,14 +60,14 @@ namespace UEBridgeMCP
 
 	static FSlateColor GetStatusColor()
 	{
-		return FWorldDataMCPServer::IsRunning()
+		return GetWorldDataMCPService().IsRunning()
 			? FSlateColor(Palette::Success())
 			: FSlateColor(Palette::Danger());
 	}
 
 	static FString BuildClientConfigSnippet()
 	{
-		const FString Token = FWorldDataMCPServer::GetAccessToken();
+		const FString Token = GetWorldDataMCPService().GetAccessToken();
 		return FString::Printf(
 			TEXT("{\n")
 			TEXT("  \"mcpServers\": {\n")
@@ -83,11 +83,11 @@ namespace UEBridgeMCP
 			TEXT("    }\n")
 			TEXT("  }\n")
 			TEXT("}"),
-			*FWorldDataMCPServer::GetServerName(),
-			*FWorldDataMCPServer::GetMcpUrl(),
-			*FWorldDataMCPServer::GetAccessTokenHeaderName(),
+			*GetWorldDataMCPService().GetServerName(),
+			*GetWorldDataMCPService().GetMcpUrl(),
+			*GetWorldDataMCPService().GetAccessTokenHeaderName(),
 			*Token,
-			*FWorldDataMCPServer::GetProjectId());
+			*GetWorldDataMCPService().GetProjectId());
 	}
 
 	static FString GetSettingsFilePath()

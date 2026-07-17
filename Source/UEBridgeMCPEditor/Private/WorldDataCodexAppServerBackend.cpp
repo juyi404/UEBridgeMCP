@@ -51,7 +51,7 @@ namespace
 		return Settings;
 	}
 
-	static bool IsHexSha256(const FString& Value)
+	static bool IsCodexAppServerSha256(const FString& Value)
 	{
 		if (Value.Len() != 64)
 		{
@@ -67,7 +67,7 @@ namespace
 		return true;
 	}
 
-	static bool TryGetFileSha256(const FString& Path, FString& OutHash)
+	static bool TryGetCodexAppServerFileSha256(const FString& Path, FString& OutHash)
 	{
 		OutHash.Empty();
 #if PLATFORM_WINDOWS
@@ -171,7 +171,7 @@ FWorldDataCodexAppServerBackend::~FWorldDataCodexAppServerBackend()
 bool FWorldDataCodexAppServerBackend::IsConfigured()
 {
 	const FAppServerSettings Settings = GetSettings();
-	if (Settings.Executable.IsEmpty() || FPaths::IsRelative(Settings.Executable) || !IsHexSha256(Settings.ExpectedSha256))
+	if (Settings.Executable.IsEmpty() || FPaths::IsRelative(Settings.Executable) || !IsCodexAppServerSha256(Settings.ExpectedSha256))
 	{
 		return false;
 	}
@@ -181,7 +181,7 @@ bool FWorldDataCodexAppServerBackend::IsConfigured()
 	FString ActualHash;
 	return FPaths::FileExists(Executable)
 		&& FPaths::GetExtension(Executable).ToLower() == TEXT("exe")
-		&& TryGetFileSha256(Executable, ActualHash)
+		&& TryGetCodexAppServerFileSha256(Executable, ActualHash)
 		&& ActualHash.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase);
 }
 
@@ -287,7 +287,7 @@ bool FWorldDataCodexAppServerBackend::FindLaunch(FString& OutExecutable, FString
 		return false;
 	}
 	FString ActualHash;
-	if (!TryGetFileSha256(Executable, ActualHash) || !ActualHash.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase))
+	if (!TryGetCodexAppServerFileSha256(Executable, ActualHash) || !ActualHash.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase))
 	{
 		UE_LOG(LogWorldDataCodexAppServer, Error, TEXT("Rejected Codex app-server executable due to SHA-256 mismatch: %s"), *Executable);
 		return false;

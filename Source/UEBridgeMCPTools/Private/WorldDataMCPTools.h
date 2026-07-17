@@ -11,6 +11,10 @@ namespace WorldDataMCP
 {
 	namespace Tools
 	{
+		// The complete structured definitions for editor-facing tools. The Core
+		// service consumes this through FToolRegistry and never owns this catalog.
+		FString GetToolDefinitionsJson();
+
 		FString ListLevelActors(const TSharedPtr<FJsonObject>& Args);
 		FString GetSelectedActors(const TSharedPtr<FJsonObject>& Args);
 		FString GetActorDetails(const TSharedPtr<FJsonObject>& Args);

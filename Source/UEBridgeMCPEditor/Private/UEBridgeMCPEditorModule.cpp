@@ -1,5 +1,5 @@
 #include "SUEBridgeMCPPanel.h"
-#include "WorldDataMCPServer.h"
+#include "UEBridgeMCPCoreModule.h"
 
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/UIAction.h"
@@ -22,7 +22,10 @@ class FUEBridgeMCPEditorModule : public IModuleInterface
 public:
 	virtual void StartupModule() override
 	{
-		FWorldDataMCPServer::Start(FWorldDataMCPServer::LoadConfiguredPort());
+		// Load Core first, then let Tools register every handler before the first
+		// HTTP request can observe tools/list.
+		FModuleManager::LoadModuleChecked<IModuleInterface>(TEXT("UEBridgeMCPTools"));
+		IUEBridgeMCPCoreModule::Get().GetService().StartConfigured();
 
 		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
 			UEBridgeMCP::PanelTabName,
@@ -45,7 +48,7 @@ public:
 			FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(UEBridgeMCP::PanelTabName);
 		}
 
-		FWorldDataMCPServer::Stop();
+		IUEBridgeMCPCoreModule::Get().GetService().Stop();
 	}
 
 private:
@@ -54,7 +57,7 @@ private:
 		return SNew(SDockTab)
 			.TabRole(ETabRole::NomadTab)
 			[
-				SNew(SUEBridgeMCPPanel)
+				CreateUEBridgeMCPPanel()
 			];
 	}
 

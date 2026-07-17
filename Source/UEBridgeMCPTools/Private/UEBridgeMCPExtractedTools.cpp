@@ -446,46 +446,6 @@ namespace
 		return SerializeObject(Result);
 	}
 
-	FString GetBootstrapResource()
-	{
-		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetBoolField(TEXT("success"), true);
-		Result->SetStringField(TEXT("source"), TEXT("UEBridgeMCP extracted tools"));
-		Result->SetStringField(TEXT("purpose"), TEXT("Read this first for compact Unreal project context."));
-		Result->SetStringField(TEXT("projectName"), FApp::GetProjectName());
-		Result->SetStringField(TEXT("engineVersion"), FEngineVersion::Current().ToString());
-
-		UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : GWorld;
-		if (World)
-		{
-			Result->SetStringField(TEXT("levelName"), World->GetMapName());
-		}
-		USelection* Selection = GEditor ? GEditor->GetSelectedActors() : nullptr;
-		Result->SetNumberField(TEXT("selectedActorCount"), Selection ? Selection->Num() : 0);
-
-		TArray<TSharedPtr<FJsonValue>> ReadOrder;
-		auto AddStep = [&ReadOrder](const FString& Uri, const FString& Why)
-		{
-			TSharedRef<FJsonObject> Step = MakeShared<FJsonObject>();
-			Step->SetStringField(TEXT("uri"), Uri);
-			Step->SetStringField(TEXT("why"), Why);
-			ReadOrder.Add(MakeShared<FJsonValueObject>(Step));
-		};
-		AddStep(TEXT("ubridge://project/info"), TEXT("Basic project identity and paths."));
-		AddStep(TEXT("ubridge://project/plugins"), TEXT("Enabled plugin inventory."));
-		AddStep(TEXT("ubridge://project/source-index"), TEXT("Project source file index."));
-		AddStep(TEXT("ubridge://content/assets"), TEXT("Asset registry overview."));
-		AddStep(TEXT("ubridge://level/current"), TEXT("Current level summary."));
-		AddStep(TEXT("ubridge://level/actors"), TEXT("Detailed actor context."));
-		AddStep(TEXT("ubridge://blueprints/index"), TEXT("Blueprint inventory."));
-		AddStep(TEXT("ubridge://pcg/graphs"), TEXT("PCG graph inventory."));
-		AddStep(TEXT("ubridge://editor/problems"), TEXT("Recent warnings and errors."));
-		AddStep(TEXT("ubridge://editor/selection"), TEXT("Focused selection context."));
-		Result->SetArrayField(TEXT("recommendedReadOrder"), ReadOrder);
-
-		return SerializeObject(Result);
-	}
-
 	void FindRecipeRoots(TArray<FString>& OutRoots)
 	{
 		const FString UEBridgeRoot = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("UEBridgeMCP"), TEXT("pcg_tool"), TEXT("recipe_library")));
@@ -613,15 +573,16 @@ namespace
 		}
 		return SerializeObject(Result);
 	}
+
+	// End private helpers. Public provider functions below intentionally stay in
+	// WorldDataMCP::ExtractedTools so they can be registered by the Tools module.
 }
 
 FString GetToolDefinitionsJson()
 {
 	return TEXT(R"JSON([
-{"name":"list_resources","description":"List UEBridgeMCP standalone resources using ubridge:// URIs.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"List Resources","readOnlyHint":true,"openWorldHint":false}},
-{"name":"read_resource","description":"Read a UEBridgeMCP standalone resource by URI. Recommended first read: ubridge://context/bootstrap.","inputSchema":{"type":"object","properties":{"uri":{"type":"string"}},"required":["uri"]},"annotations":{"title":"Read Resource","readOnlyHint":true,"openWorldHint":false}},
 {"name":"read_log","description":"Read recent Unreal log lines from the project Saved/Logs folder. Supports lines, severity, and category filters.","inputSchema":{"type":"object","properties":{"lines":{"type":"number","description":"Number of lines. Default 50."},"severity":{"type":"string","description":"Filter: Error, Warning, Log."},"category":{"type":"string"}}},"annotations":{"title":"Read Log","readOnlyHint":true,"openWorldHint":false}},
-	{"name":"execute_python","description":"Execute Python only when the project explicitly enables it and the caller supplies the current editor-session unsafe_token copied by the user from the UEBridgeMCP panel. Prefer structured UE tools first.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."},"unsafe_confirm":{"type":"string","description":"Must equal: I understand this runs arbitrary Unreal Python"},"unsafe_token":{"type":"string","description":"Short-lived capability token copied explicitly from the UEBridgeMCP panel."}},"required":["code","unsafe_confirm","unsafe_token"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":true,"openWorldHint":true}},
+{"name":"execute_python","description":"Execute Python only when the project explicitly enables it and the caller supplies the current editor-session unsafe_token copied by the user from the UEBridgeMCP panel. Prefer structured UE tools first.","inputSchema":{"type":"object","properties":{"code":{"type":"string","description":"Python code to execute."},"unsafe_confirm":{"type":"string","description":"Must equal: I understand this runs arbitrary Unreal Python"},"unsafe_token":{"type":"string","description":"Short-lived capability token copied explicitly from the UEBridgeMCP panel."}},"required":["code","unsafe_confirm","unsafe_token"]},"annotations":{"title":"Execute Python","readOnlyHint":false,"destructiveHint":true,"openWorldHint":true}},
 {"name":"search_assets","description":"Search project assets by name, path, and optional class filter.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"classFilter":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Search Assets","readOnlyHint":true,"openWorldHint":false}},
 {"name":"find_static_meshes","description":"Search StaticMesh assets for placement or PCG use.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"searchTerm":{"type":"string"},"path":{"type":"string"},"maxResults":{"type":"number"}}},"annotations":{"title":"Find Static Meshes","readOnlyHint":true,"openWorldHint":false}},
 {"name":"get_level_actors","description":"UEBridgeMCP alias for listing current editor level actors.","inputSchema":{"type":"object","properties":{"classFilter":{"type":"string"},"nameContains":{"type":"string"},"selectedOnly":{"type":"boolean"},"maxResults":{"type":"number"}}},"annotations":{"title":"Get Level Actors","readOnlyHint":true,"openWorldHint":false}},
@@ -641,103 +602,7 @@ FString GetToolDefinitionsJson()
 ])JSON");
 }
 
-bool Dispatch(const FString& ToolName, const TSharedPtr<FJsonObject>& Args, FString& OutResult)
-{
-	if (ToolName == TEXT("list_resources")) { OutResult = ListResources(); return true; }
-	if (ToolName == TEXT("read_resource")) { OutResult = ReadResource(Args); return true; }
-	if (ToolName == TEXT("read_log")) { OutResult = ReadLog(Args); return true; }
-	if (ToolName == TEXT("execute_python")) { OutResult = ExecutePython(Args); return true; }
-	if (ToolName == TEXT("search_assets")) { OutResult = SearchAssets(Args); return true; }
-	if (ToolName == TEXT("find_static_meshes")) { OutResult = FindStaticMeshes(Args); return true; }
-	if (ToolName == TEXT("get_level_actors")) { OutResult = GetLevelActors(Args); return true; }
-	if (ToolName == TEXT("get_project_info")) { OutResult = GetProjectInfo(Args); return true; }
-	if (ToolName == TEXT("list_project_modules")) { OutResult = ListProjectModules(Args); return true; }
-	if (ToolName == TEXT("get_build_configuration")) { OutResult = GetBuildConfiguration(Args); return true; }
-	if (ToolName == TEXT("read_file")) { OutResult = ReadFile(Args); return true; }
-	if (ToolName == TEXT("write_file")) { OutResult = WriteFile(Args); return true; }
-	if (ToolName == TEXT("delete_file")) { OutResult = DeleteFile(Args); return true; }
-	if (ToolName == TEXT("rename_file")) { OutResult = RenameFile(Args); return true; }
-	if (ToolName == TEXT("play_in_editor")) { OutResult = PlayInEditor(Args); return true; }
-	if (ToolName == TEXT("stop_pie")) { OutResult = StopPIE(Args); return true; }
-	if (ToolName == TEXT("pcg_recipe_library_status")) { OutResult = PcgRecipeLibraryStatus(Args); return true; }
-	if (ToolName == TEXT("search_pcg_recipes")) { OutResult = SearchPcgRecipes(Args); return true; }
-	if (ToolName == TEXT("read_pcg_recipe")) { OutResult = ReadPcgRecipe(Args); return true; }
-	if (ToolName == TEXT("read_pcg_scene_binding")) { OutResult = ReadPcgSceneBinding(Args); return true; }
-	return false;
-}
-
-FString ListResources()
-{
-	TArray<TSharedPtr<FJsonValue>> Resources;
-	AddResource(Resources, TEXT("ubridge://context/bootstrap"), TEXT("Bootstrap Context"), TEXT("Recommended first-read order and compact editor state."));
-	AddResource(Resources, TEXT("ubridge://project/info"), TEXT("Project Info"), TEXT("Engine version, project name, paths, and MCP endpoint."));
-	AddResource(Resources, TEXT("ubridge://project/plugins"), TEXT("Project Plugins"), TEXT("Enabled plugin inventory and plugin metadata."));
-	AddResource(Resources, TEXT("ubridge://project/source-index"), TEXT("Project Source Index"), TEXT("Source and plugin code file index."));
-	AddResource(Resources, TEXT("ubridge://content/assets"), TEXT("Content Assets"), TEXT("Asset registry survey under /Game."));
-	AddResource(Resources, TEXT("ubridge://level/current"), TEXT("Current Level"), TEXT("Current map summary and actor class distribution."));
-	AddResource(Resources, TEXT("ubridge://level/actors"), TEXT("Level Actors"), TEXT("Current editor-world actors and transforms."));
-	AddResource(Resources, TEXT("ubridge://level/components"), TEXT("Level Components"), TEXT("Component class distribution in the current world."));
-	AddResource(Resources, TEXT("ubridge://blueprints/index"), TEXT("Blueprint Index"), TEXT("Blueprint asset inventory."));
-	AddResource(Resources, TEXT("ubridge://pcg/graphs"), TEXT("PCG Graphs"), TEXT("PCG graph asset inventory."));
-	AddResource(Resources, TEXT("ubridge://editor/problems"), TEXT("Editor Problems"), TEXT("Recent warning/error log lines."));
-	AddResource(Resources, TEXT("ubridge://editor/selection"), TEXT("Editor Selection"), TEXT("Currently selected actors."));
-	AddResource(Resources, TEXT("ubridge://editor/performance"), TEXT("Performance Stats"), TEXT("Memory and actor-count snapshot."));
-	AddResource(Resources, TEXT("ubridge://editor/log"), TEXT("Editor Log"), TEXT("Recent project log lines."));
-	AddResource(Resources, TEXT("ubridge://editor/viewport"), TEXT("Viewport Info"), TEXT("Viewport availability summary."));
-
-	TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("success"), true);
-	Result->SetStringField(TEXT("source"), TEXT("UEBridgeMCP"));
-	Result->SetStringField(TEXT("recommendedFirstRead"), TEXT("ubridge://context/bootstrap"));
-	Result->SetArrayField(TEXT("resources"), Resources);
-	return SerializeObject(Result);
-}
-
-FString ReadResource(const TSharedPtr<FJsonObject>& Args)
-{
-	const FString Uri = GetStringField(Args, TEXT("uri"));
-	if (Uri.IsEmpty())
-	{
-		return ErrorJson(TEXT("uri is required."));
-	}
-
-	if (Uri == TEXT("ubridge://context/bootstrap")) return GetBootstrapResource();
-	if (Uri == TEXT("ubridge://project/info")) return FWorldDataMCPServer::GetProjectInfoJson();
-	if (Uri == TEXT("ubridge://project/plugins")) return GetProjectPluginsResource();
-	if (Uri == TEXT("ubridge://project/source-index")) return GetProjectSourceIndexResource();
-	if (Uri == TEXT("ubridge://content/assets")) return FWorldDataMCPServer::ReadResource(TEXT("worlddata://content/assets"));
-	if (Uri == TEXT("ubridge://level/current")) return GetCurrentLevelResource();
-	if (Uri == TEXT("ubridge://level/actors")) return FWorldDataMCPServer::ReadResource(TEXT("worlddata://level/actors"));
-	if (Uri == TEXT("ubridge://level/components")) return GetLevelComponentsResource();
-	if (Uri == TEXT("ubridge://blueprints/index"))
-	{
-		TSharedPtr<FJsonObject> Query = MakeShared<FJsonObject>();
-		Query->SetStringField(TEXT("classFilter"), TEXT("Blueprint"));
-		Query->SetNumberField(TEXT("maxResults"), MaxResourceRows);
-		return WorldDataMCP::Tools::FindAssets(Query);
-	}
-	if (Uri == TEXT("ubridge://pcg/graphs"))
-	{
-		TSharedPtr<FJsonObject> Query = MakeShared<FJsonObject>();
-		Query->SetStringField(TEXT("classFilter"), TEXT("PCG"));
-		Query->SetNumberField(TEXT("maxResults"), MaxResourceRows);
-		return WorldDataMCP::Tools::FindAssets(Query);
-	}
-	if (Uri == TEXT("ubridge://editor/problems"))
-	{
-		TSharedPtr<FJsonObject> Query = MakeShared<FJsonObject>();
-		Query->SetNumberField(TEXT("lines"), 80);
-		return ReadLog(Query);
-	}
-	if (Uri == TEXT("ubridge://editor/selection")) return FWorldDataMCPServer::ReadResource(TEXT("worlddata://editor/selection"));
-	if (Uri == TEXT("ubridge://editor/performance")) return GetEditorPerformanceResource();
-	if (Uri == TEXT("ubridge://editor/log")) return ReadLog(MakeShared<FJsonObject>());
-	if (Uri == TEXT("ubridge://editor/viewport")) return GetViewportResource();
-
-	return ErrorJson(FString::Printf(TEXT("Unknown resource: %s"), *Uri));
-}
-
-FString ReadLog(const TSharedPtr<FJsonObject>& Args)
+	FString ReadLog(const TSharedPtr<FJsonObject>& Args)
 {
 	int32 LineCount = FMath::Clamp(static_cast<int32>(GetNumberField(Args, TEXT("lines"), 50)), 1, 1000);
 	const FString Severity = GetStringField(Args, TEXT("severity"));

@@ -11,6 +11,7 @@
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
+#include "Policies/CondensedJsonPrintPolicy.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -55,7 +56,7 @@ namespace WorldDataMCP::ToolGovernance
 				TEXT("attach_actor"), TEXT("set_actor_property"), TEXT("save_current_level"),
 				TEXT("create_asset"), TEXT("create_blueprint_asset"), TEXT("modify_material_instance"),
 				TEXT("create_pcg_graph_from_recipe"), TEXT("get_codex_policy_snapshot"),
-				TEXT("list_resources"), TEXT("read_resource"), TEXT("read_log"), TEXT("execute_python"),
+				TEXT("read_log"), TEXT("execute_python"),
 				TEXT("search_assets"), TEXT("find_static_meshes"), TEXT("get_level_actors"),
 				TEXT("get_project_info"), TEXT("list_project_modules"), TEXT("get_build_configuration"),
 				TEXT("read_file"), TEXT("write_file"), TEXT("delete_file"), TEXT("rename_file"),

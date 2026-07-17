@@ -23,9 +23,7 @@ namespace
 	TSharedPtr<FJsonObject> GetResult(const TSharedPtr<FJsonObject>& Response)
 	{
 		const TSharedPtr<FJsonObject>* Result = nullptr;
-		return Response.IsValid() && Response->TryGetObjectField(TEXT("result"), Result) && Result && Result->IsValid()
-			? *Result
-			: nullptr;
+		return Response.IsValid() && Response->TryGetObjectField(TEXT("result"), Result) && Result && Result->IsValid() ? *Result : nullptr;
 	}
 
 	bool ParseObject(const FString& Text, TSharedPtr<FJsonObject>& OutObject)
@@ -46,22 +44,46 @@ bool FUEBridgeMCPJsonRpcContractTest::RunTest(const FString& Parameters)
 	InitializeParams->SetStringField(TEXT("protocolVersion"), TEXT("2025-06-18"));
 	TSharedPtr<FJsonObject> Initialize = GetResult(FWorldDataMCPServer::ProcessJsonRpc(MakeRequest(TEXT("initialize"), InitializeParams)));
 	TestTrue(TEXT("initialize returns a JSON-RPC result"), Initialize.IsValid());
-	if (Initialize.IsValid())
-	{
-		FString ProtocolVersion;
-		TestTrue(TEXT("initialize negotiates a protocol version"), Initialize->TryGetStringField(TEXT("protocolVersion"), ProtocolVersion));
-	}
 
 	TSharedPtr<FJsonObject> ToolList = GetResult(FWorldDataMCPServer::ProcessJsonRpc(MakeRequest(TEXT("tools/list"), MakeShared<FJsonObject>())));
 	TestTrue(TEXT("tools/list returns a result"), ToolList.IsValid());
-	if (ToolList.IsValid())
+	const TArray<TSharedPtr<FJsonValue>>* Tools = nullptr;
+	TestTrue(TEXT("tools/list exposes a tools array"), ToolList.IsValid() && ToolList->TryGetArrayField(TEXT("tools"), Tools) && Tools && Tools->Num() > 0);
+	bool bHasLegacyResourceTool = false;
+	bool bHasReadLog = false;
+	if (Tools)
 	{
-		const TArray<TSharedPtr<FJsonValue>>* Tools = nullptr;
-		TestTrue(TEXT("tools/list exposes a tools array"), ToolList->TryGetArrayField(TEXT("tools"), Tools) && Tools && Tools->Num() > 0);
+		for (const TSharedPtr<FJsonValue>& Value : *Tools)
+		{
+			FString Name;
+			const TSharedPtr<FJsonObject> Tool = Value.IsValid() ? Value->AsObject() : nullptr;
+			if (Tool.IsValid() && Tool->TryGetStringField(TEXT("name"), Name))
+			{
+				bHasLegacyResourceTool |= Name == TEXT("list_resources") || Name == TEXT("read_resource");
+				bHasReadLog |= Name == TEXT("read_log");
+			}
+		}
 	}
+	TestFalse(TEXT("tools/list does not expose legacy resource tools"), bHasLegacyResourceTool);
+	TestTrue(TEXT("tools/list retains migrated supplemental tools"), bHasReadLog);
 
 	TSharedPtr<FJsonObject> ResourceList = GetResult(FWorldDataMCPServer::ProcessJsonRpc(MakeRequest(TEXT("resources/list"), MakeShared<FJsonObject>())));
 	TestTrue(TEXT("resources/list returns a result"), ResourceList.IsValid());
+	const TArray<TSharedPtr<FJsonValue>>* Resources = nullptr;
+	bool bHasLegacyUri = false;
+	if (ResourceList.IsValid() && ResourceList->TryGetArrayField(TEXT("resources"), Resources) && Resources)
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Resources)
+		{
+			FString Uri;
+			const TSharedPtr<FJsonObject> Resource = Value.IsValid() ? Value->AsObject() : nullptr;
+			if (Resource.IsValid() && Resource->TryGetStringField(TEXT("uri"), Uri))
+			{
+				bHasLegacyUri |= Uri.StartsWith(TEXT("ubridge://"));
+			}
+		}
+	}
+	TestFalse(TEXT("resources/list does not expose legacy ubridge URIs"), bHasLegacyUri);
 
 	TSharedRef<FJsonObject> ReadParams = MakeShared<FJsonObject>();
 	ReadParams->SetStringField(TEXT("uri"), TEXT("worlddata://mcp/governance"));

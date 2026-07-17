@@ -7,7 +7,7 @@
 class FJsonObject;
 class FJsonValue;
 
-struct FWorldDataMCPSessionState
+struct UEBRIDGEMCPCORE_API FWorldDataMCPSessionState
 {
 	FString ProtocolVersion;
 	FString ClientLabel;
@@ -20,7 +20,7 @@ struct FWorldDataMCPSessionState
 	FDateTime LastActivityAtUtc;
 };
 
-struct FWorldDataMCPApprovalSummary
+struct UEBRIDGEMCPCORE_API FWorldDataMCPApprovalSummary
 {
 	FString ApprovalId;
 	FString ToolName;
@@ -34,7 +34,7 @@ struct FWorldDataMCPApprovalSummary
 	bool bReadyForDecision = false;
 };
 
-class FWorldDataMCPServer
+class UEBRIDGEMCPCORE_API FWorldDataMCPServer
 {
 public:
 	static void Start(int32 Port);
