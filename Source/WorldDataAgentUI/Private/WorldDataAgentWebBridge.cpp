@@ -197,6 +197,8 @@ void UWorldDataAgentWebBridge::NewConversation()
 	UiErrorCode.Empty();
 	UiErrorMessage.Empty();
 	AddDraftConversation();
+	bBusy = true;
+	StartThreadForPendingMessage();
 }
 
 void UWorldDataAgentWebBridge::ResumeThread(const FString& ThreadId, const FString& Model)
