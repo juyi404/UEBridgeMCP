@@ -9,9 +9,11 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
 #include "SWebBrowser.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "WebBrowserModule.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -52,6 +54,25 @@ void SUEBridgeMCPWebPanel::Construct(const FArguments& InArgs)
 			[
 				SNew(STextBlock)
 				.Text(FText::FromString(FString::Printf(TEXT("无法加载 UEBridgeMCP HTML 界面：%s"), *HtmlPath)))
+				.AutoWrapText(true)
+			]
+		];
+		return;
+	}
+
+	// A Build.cs dependency provides symbols but does not guarantee the runtime
+	// module has been loaded yet.  Without this the Slate wrapper creates no CEF
+	// browser window and keeps its initial throbber visible indefinitely.
+	IWebBrowserModule* WebBrowserModule = FModuleManager::LoadModulePtr<IWebBrowserModule>(TEXT("WebBrowser"));
+	if (!WebBrowserModule || !WebBrowserModule->IsWebModuleAvailable())
+	{
+		ChildSlot
+		[
+			SNew(SBorder)
+			.Padding(16.0f)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(TEXT("UE WebBrowser / CEF 模块不可用，无法加载 WorldData MCP 控制台。请检查编辑器的 WebBrowser 组件安装。")))
 				.AutoWrapText(true)
 			]
 		];
