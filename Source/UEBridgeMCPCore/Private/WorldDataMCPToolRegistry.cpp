@@ -42,15 +42,20 @@ namespace WorldDataMCP
 	FString FToolRegistry::GetRegisteredDefinitionsJson() const
 	{
 		FReadScopeLock ReadLock(Lock);
-		FString Result;
+		TArray<TSharedPtr<FJsonValue>> CombinedDefinitions;
 		for (const FString& Definitions : DefinitionSets)
 		{
-			if (!Result.IsEmpty())
+			TArray<TSharedPtr<FJsonValue>> ParsedDefinitions;
+			TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Definitions);
+			if (FJsonSerializer::Deserialize(Reader, ParsedDefinitions))
 			{
-				Result += TEXT("\n");
+				CombinedDefinitions.Append(ParsedDefinitions);
 			}
-			Result += Definitions;
 		}
+
+		FString Result;
+		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Result);
+		FJsonSerializer::Serialize(CombinedDefinitions, Writer);
 		return Result;
 	}
 
