@@ -946,47 +946,6 @@ namespace
 		return JsonObjectToString(Result);
 	}
 
-	static void AppendToolDefinitionsFromJson(const FString& ToolsJson, TArray<TSharedPtr<FJsonValue>>& OutTools, TSet<FString>& SeenToolNames)
-	{
-		TArray<TSharedPtr<FJsonValue>> ParsedTools;
-		TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ToolsJson);
-		if (!FJsonSerializer::Deserialize(Reader, ParsedTools))
-		{
-			return;
-		}
-
-		for (const TSharedPtr<FJsonValue>& ToolValue : ParsedTools)
-		{
-			TSharedPtr<FJsonObject> ToolObject = ToolValue.IsValid() ? ToolValue->AsObject() : nullptr;
-			if (!ToolObject.IsValid())
-			{
-				continue;
-			}
-
-			FString ToolName;
-			if (!ToolObject->TryGetStringField(TEXT("name"), ToolName) || ToolName.IsEmpty() || SeenToolNames.Contains(ToolName))
-			{
-				continue;
-			}
-
-			SeenToolNames.Add(ToolName);
-			OutTools.Add(ToolValue);
-		}
-	}
-
-	static FString BuildCombinedToolDefinitionsJson(const FString& LocalToolsJson)
-	{
-		TArray<TSharedPtr<FJsonValue>> MergedTools;
-		TSet<FString> SeenToolNames;
-		AppendToolDefinitionsFromJson(LocalToolsJson, MergedTools, SeenToolNames);
-		AppendToolDefinitionsFromJson(WorldDataMCP::FToolRegistry::Get().GetRegisteredDefinitionsJson(), MergedTools, SeenToolNames);
-
-		FString Out;
-		TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-		FJsonSerializer::Serialize(MergedTools, Writer);
-		return Out;
-	}
-
 	static FString StripTomlComment(const FString& Line)
 	{
 		bool bInString = false;
