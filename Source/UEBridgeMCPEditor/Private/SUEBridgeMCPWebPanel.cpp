@@ -64,7 +64,10 @@ void SUEBridgeMCPWebPanel::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SAssignNew(Browser, SWebBrowser)
-		.InitialURL(TEXT("worlddata-ui://uebridge-mcp/index.html"))
+		// ContentsToLoad is served by CEF as the response to this navigation.  Use
+		// a normal web scheme here: an unregistered custom scheme leaves CEF's
+		// initial navigation pending and the Slate throbber never dismisses.
+		.InitialURL(TEXT("http://worlddata.local/uebridge-mcp/index.html"))
 		.ContentsToLoad(Html)
 		.ShowControls(false)
 		.ShowAddressBar(false)
@@ -604,9 +607,9 @@ void SUEBridgeMCPWebPanel::HandleAcpPermission(const FWorldDataAcpPermissionRequ
 
 bool SUEBridgeMCPWebPanel::HandleBeforeNavigation(const FString& Url, const FWebNavigationRequest& Request) const
 {
-	// The UI is loaded with LoadString under this private origin.  Do not turn
-	// the embedded editor control into a general-purpose browser.
-	return !Url.StartsWith(TEXT("worlddata-ui://"), ESearchCase::IgnoreCase);
+	// ContentsToLoad is delivered under this private, non-routable origin.  Do
+	// not turn the embedded editor control into a general-purpose browser.
+	return !Url.StartsWith(TEXT("http://worlddata.local/uebridge-mcp/"), ESearchCase::IgnoreCase);
 }
 
 bool SUEBridgeMCPWebPanel::HandleBeforePopup(FString Url, FString Target) const
