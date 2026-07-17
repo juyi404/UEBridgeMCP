@@ -7,12 +7,14 @@
 #include "UEBridgeMCPCoreModule.h"
 #include "UEBridgeMCPPanelViewModel.h"
 #include "WorldDataAgentBackendFactory.h"
+#include "WorldDataCodexACPClient.h"
+#include "WorldDataCodexAcpBootstrap.h"
 #include "UEBridgeMCPStyle.h"
 
+#include "Async/Async.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "HAL/FileManager.h"
-#include "HAL/PlatformProcess.h"
 #include "Misc/DateTime.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
@@ -35,7 +37,6 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SGridPanel.h"
 #include "Widgets/Layout/SScrollBox.h"
-#include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Layout/SWrapBox.h"
 #include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/SBoxPanel.h"
@@ -56,17 +57,12 @@ public:
 		ViewModel = MakeUnique<FUEBridgeMCPPanelViewModel>();
 		ViewModel->Initialize(LOCTEXT("InitialLastAction", "新会话已就绪。"));
 		LoadSettings();
-		RefreshCliDetections();
+		RefreshCodexAcpSetupStatus();
 		ConfigureLightTextBoxStyle();
 		ConfigureComposerButtonStyle();
 		AgentController = MakeUnique<FUEBridgeMCPAgentController>();
 		ApprovalController = MakeUnique<FUEBridgeMCPApprovalController>();
-		AgentBackend = AgentController->Start(
-			CurrentMode,
-			FWorldDataAcpTextDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpText),
-			FWorldDataAcpStatusDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpStatus),
-			FWorldDataAcpErrorDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpError),
-			FWorldDataAcpPermissionDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpPermission));
+		StartConfiguredAgentBackend();
 
 		ChildSlot
 		[
@@ -104,12 +100,6 @@ private:
 		System,
 		Tool,
 		Error
-	};
-
-	enum class ECliTool : uint8
-	{
-		Codex,
-		Cursor
 	};
 
 	struct FConversationMessage
@@ -744,18 +734,18 @@ private:
 							[
 								BuildIconTextButton(LOCTEXT("HtmlParityOpenProject", "+"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnOpenProjectFolderClicked), LOCTEXT("HtmlParityOpenProjectTooltip", "打开项目目录（附件发送尚未实现）"))
 							]
-							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 7.0f, 0.0f)
-							[
-								BuildHtmlParityContextChip(LOCTEXT("HtmlParityCliLabel", "Backend"), FText::FromString(AgentBackend.IsValid() ? AgentBackend->GetDisplayName() : TEXT("Unavailable")), LOCTEXT("HtmlParityCliTooltip", "The conversation backend is selected independently from the HTTP MCP automation server."))
-							]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 7.0f, 0.0f)
+			[
+				BuildBackendCombo()
+			]
 							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0.0f, 0.0f, 7.0f, 0.0f)
 							[
 								BuildModeCombo()
 							]
-							+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-							[
-								BuildHtmlParityContextChip(LOCTEXT("HtmlParityModelLabel", "Protocol"), FText::FromString(AgentBackend.IsValid() && AgentBackend->GetBackendId() == TEXT("codex_app_server") ? TEXT("Codex app-server JSONL") : TEXT("Adapter-defined")), LOCTEXT("HtmlParityModelTooltip", "ACP features are adapter-defined. Codex app-server uses independent JSON-RPC thread and turn messages."))
-							]
+			+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+			[
+				BuildModelCombo()
+			]
 							+ SHorizontalBox::Slot().FillWidth(1.0f)
 							[
 								SNullWidget::NullWidget
@@ -1112,10 +1102,311 @@ private:
 			];
 	}
 
+	void StartConfiguredAgentBackend()
+	{
+		if (!AgentController.IsValid())
+		{
+			return;
+		}
+
+		AgentBackend = AgentController->Start(
+			CurrentMode,
+			FWorldDataAcpTextDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpText),
+			FWorldDataAcpStatusDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpStatus),
+			FWorldDataAcpErrorDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpError),
+			FWorldDataAcpPermissionDelegate::CreateSP(this, &SUEBridgeMCPPanel::HandleAcpPermission));
+	}
+
+	bool RestartAgentBackend(const FText& SuccessMessage)
+	{
+		if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
+		{
+			SetLastAction(LOCTEXT("BackendChangeBusy", "Finish or stop the current response before changing Backend or model."));
+			return false;
+		}
+
+		bHasPendingPermission = false;
+		PendingPermissionId = 0;
+		StartConfiguredAgentBackend();
+		SetLastAction(SuccessMessage);
+		return true;
+	}
+
+	FText GetBackendChoiceLabel() const
+	{
+		const FString Selected = FWorldDataAgentBackendFactory::GetConfiguredBackendId();
+		if (Selected == TEXT("auto"))
+		{
+			return FText::FromString(AgentBackend.IsValid()
+				? FString::Printf(TEXT("Auto (%s)"), *AgentBackend->GetDisplayName())
+				: TEXT("Auto"));
+		}
+		if (Selected == TEXT("codex_app_server"))
+		{
+			return LOCTEXT("BackendCodexAppServer", "Codex app-server");
+		}
+		if (Selected == TEXT("acp_codex"))
+		{
+			return LOCTEXT("BackendCodexAcp", "Codex ACP");
+		}
+		if (Selected == TEXT("acp_cursor"))
+		{
+			return LOCTEXT("BackendCursorAcp", "Cursor ACP");
+		}
+		if (Selected == TEXT("acp_claude"))
+		{
+			return LOCTEXT("BackendClaudeAcp", "Claude Code ACP");
+		}
+		return FText::FromString(Selected);
+	}
+
+	TSharedRef<SWidget> BuildBackendCombo()
+	{
+		return SNew(SComboButton)
+			.ToolTipText(LOCTEXT("BackendComboTooltip", "Choose the embedded conversation backend. HTTP MCP remains a separate UE automation service."))
+			.ComboButtonStyle(&ComposerComboButtonStyle)
+			.ButtonStyle(&ComposerButtonStyle)
+			.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
+			.ForegroundColor(FSlateColor(GetPanelTextColor()))
+			.ContentPadding(FMargin(8.0f, 3.0f))
+			.HasDownArrow(false)
+			.ButtonContent()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("BackendComboLabel", "Backend"))
+					.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+					.Font(GetHtmlParityFont(11, true))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock)
+					.Text_Lambda([this] { return GetBackendChoiceLabel(); })
+					.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
+					.Font(GetHtmlParityFont(12))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock).Text(LOCTEXT("BackendComboChevron", "v")).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(11))
+				]
+			]
+			.MenuContent()
+			[
+				BuildBackendMenu()
+			];
+	}
+
+	TSharedRef<SWidget> BuildBackendMenu()
+	{
+		TSharedRef<SVerticalBox> Items = SNew(SVerticalBox);
+		for (const FWorldDataAgentBackendOption& Option : FWorldDataAgentBackendFactory::GetBackendOptions())
+		{
+			Items->AddSlot().AutoHeight().Padding(0.0f, 2.0f)
+			[
+				BuildBackendMenuItem(Option)
+			];
+		}
+
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(&HtmlLargeCardBrush)
+			.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+			[
+				SNew(SBorder)
+				.Padding(FMargin(8.0f, 7.0f))
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight().Padding(4.0f, 2.0f, 4.0f, 8.0f)
+					[
+						SNew(STextBlock).Text(LOCTEXT("BackendMenuTitle", "Conversation Backend")).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						Items
+					]
+				]
+			];
+	}
+
+	TSharedRef<SWidget> BuildBackendMenuItem(const FWorldDataAgentBackendOption& Option)
+	{
+		const FString OptionId = Option.Id;
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor_Lambda([this, OptionId]
+			{
+				return FWorldDataAgentBackendFactory::GetConfiguredBackendId() == OptionId
+					? FSlateColor(GetAccentBorderColor()) : FSlateColor(UEBridgeMCP::Palette::Background());
+			})
+			.OnMouseButtonDown_Lambda([this, OptionId](const FGeometry&, const FPointerEvent&)
+			{
+				if (AgentBackend.IsValid() && AgentBackend->IsProcessing())
+				{
+					SetLastAction(LOCTEXT("BackendChangeBusyMenu", "Finish or stop the current response before changing Backend."));
+					FSlateApplication::Get().DismissAllMenus();
+					return FReply::Handled();
+				}
+
+				FString Error;
+				if (!FWorldDataAgentBackendFactory::SetConfiguredBackendId(OptionId, Error))
+				{
+					SetLastAction(FText::FromString(Error));
+				}
+				else
+				{
+					RestartAgentBackend(FText::Format(LOCTEXT("BackendChangedAction", "Conversation Backend changed to {0}. A new backend session will be created on the next message."), GetBackendChoiceLabel()));
+				}
+				FSlateApplication::Get().DismissAllMenus();
+				return FReply::Handled();
+			})
+			[
+				SNew(SBorder)
+				.Padding(FMargin(10.0f, 7.0f))
+				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+				.BorderBackgroundColor_Lambda([this, OptionId]
+				{
+					return FWorldDataAgentBackendFactory::GetConfiguredBackendId() == OptionId
+						? FSlateColor(GetAccentFillColor(0.18f)) : FSlateColor(UEBridgeMCP::Palette::Background());
+				})
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Text(FText::FromString(Option.DisplayName + (Option.bConfigured ? TEXT("") : TEXT(" (not configured)")))).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
+					[
+						SNew(STextBlock).Text(FText::FromString(Option.Description)).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).AutoWrapText(true).WrapTextAt(420.0f)
+					]
+				]
+			];
+	}
+
+	bool CanSelectModel() const
+	{
+		return AgentBackend.IsValid() && AgentBackend->GetCapabilities().bSupportsModelSelection;
+	}
+
+	FText GetModelChoiceLabel() const
+	{
+		if (!CanSelectModel())
+		{
+			return LOCTEXT("AdapterManagedModel", "Adapter-managed");
+		}
+		const FString Model = FWorldDataAgentBackendFactory::GetCodexAppServerModel();
+		return Model.IsEmpty() ? LOCTEXT("CodexDefaultModel", "Codex default") : FText::FromString(Model);
+	}
+
+	TSharedRef<SWidget> BuildModelCombo()
+	{
+		return SNew(SComboButton)
+			.ToolTipText_Lambda([this]
+			{
+				return CanSelectModel()
+					? LOCTEXT("ModelComboTooltip", "Choose the model used for the next Codex app-server thread.")
+					: LOCTEXT("AdapterModelTooltip", "This ACP backend controls its own model. The plugin does not send an unverified model-selection request to an adapter.");
+			})
+			.ComboButtonStyle(&ComposerComboButtonStyle)
+			.ButtonStyle(&ComposerButtonStyle)
+			.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
+			.ForegroundColor(FSlateColor(GetPanelTextColor()))
+			.ContentPadding(FMargin(8.0f, 3.0f))
+			.HasDownArrow(false)
+			.IsEnabled_Lambda([this] { return CanSelectModel(); })
+			.ButtonContent()
+			[
+				SNew(SHorizontalBox)
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
+				[
+					SNew(STextBlock).Text(LOCTEXT("ModelComboLabel", "Model")).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(11, true))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(4.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock).Text_Lambda([this] { return GetModelChoiceLabel(); }).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(GetHtmlParityFont(12))
+				]
+				+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.0f, 0.0f, 0.0f, 0.0f)
+				[
+					SNew(STextBlock).Text(LOCTEXT("ModelComboChevron", "v")).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).Font(GetHtmlParityFont(11))
+				]
+			]
+			.MenuContent()
+			[
+				BuildModelMenu()
+			];
+	}
+
+	TSharedRef<SWidget> BuildModelMenu()
+	{
+		return SNew(SBorder)
+			.Padding(1.0f)
+			.BorderImage(&HtmlLargeCardBrush)
+			.BorderBackgroundColor(FSlateColor(GetPanelBorderColor()))
+			[
+				SNew(SBorder).Padding(FMargin(10.0f, 8.0f)).BorderImage(FAppStyle::GetBrush("WhiteBrush")).BorderBackgroundColor(FSlateColor(GetPanelBackgroundColor()))
+				[
+					SNew(SVerticalBox)
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SNew(STextBlock).Text(LOCTEXT("ModelMenuTitle", "Codex app-server model")).ColorAndOpacity(FSlateColor(GetPanelTextColor())).Font(FAppStyle::GetFontStyle("NormalFontBold"))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 7.0f)
+					[
+						SNew(STextBlock).Text(LOCTEXT("ModelMenuDescription", "Enter an exact model ID supported by the installed Codex app-server. It applies after the backend restarts and creates a new thread.")).ColorAndOpacity(FSlateColor(GetPanelMutedTextColor())).AutoWrapText(true).WrapTextAt(400.0f)
+					]
+					+ SVerticalBox::Slot().AutoHeight()
+					[
+						SAssignNew(ModelTextBox, SEditableTextBox).Text(FText::FromString(FWorldDataAgentBackendFactory::GetCodexAppServerModel())).HintText(LOCTEXT("ModelIdHint", "Codex default"))
+					]
+					+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 8.0f, 0.0f, 0.0f)
+					[
+						SNew(SHorizontalBox)
+						+ SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 6.0f, 0.0f)
+						[
+							BuildToolbarButton(LOCTEXT("ApplyModel", "Apply model"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnApplyModelClicked))
+						]
+						+ SHorizontalBox::Slot().AutoWidth()
+						[
+							BuildToolbarButton(LOCTEXT("UseDefaultModel", "Use Codex default"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnUseDefaultModelClicked))
+						]
+					]
+				]
+			];
+	}
+
+	FReply OnApplyModelClicked()
+	{
+		if (!CanSelectModel())
+		{
+			SetLastAction(LOCTEXT("ModelUnavailable", "The selected backend does not expose a verified model-selection capability."));
+			return FReply::Handled();
+		}
+		const FString Model = ModelTextBox.IsValid() ? ModelTextBox->GetText().ToString().TrimStartAndEnd() : FString();
+		FWorldDataAgentBackendFactory::SetCodexAppServerModel(Model);
+		RestartAgentBackend(Model.IsEmpty()
+			? LOCTEXT("ModelResetAction", "Codex default model selected. A new backend thread will be created on the next message.")
+			: FText::Format(LOCTEXT("ModelChangedAction", "Codex model changed to {0}. A new backend thread will be created on the next message."), FText::FromString(Model)));
+		FSlateApplication::Get().DismissAllMenus();
+		return FReply::Handled();
+	}
+
+	FReply OnUseDefaultModelClicked()
+	{
+		if (ModelTextBox.IsValid())
+		{
+			ModelTextBox->SetText(FText::GetEmpty());
+		}
+		return OnApplyModelClicked();
+	}
+
 	TSharedRef<SWidget> BuildModeCombo()
 	{
 		return SNew(SComboButton)
-			.ToolTipText(LOCTEXT("ModeComboTooltip", "选择 Codex 执行模式"))
+			.ToolTipText(LOCTEXT("ModeComboTooltip", "Choose the host execution mode for the selected conversation backend."))
 			.ComboButtonStyle(&ComposerComboButtonStyle)
 			.ButtonStyle(&ComposerButtonStyle)
 			.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
@@ -1822,7 +2113,66 @@ private:
 			.AutoHeight()
 			.Padding(0.0f, 12.0f, 0.0f, 0.0f)
 			[
-				BuildCliSettingsPanel()
+				BuildCodexAcpSetupPanel()
+			]
+			];
+	}
+
+	TSharedRef<SWidget> BuildCodexAcpSetupPanel()
+	{
+		return SNew(SBorder)
+			.Padding(12.0f)
+			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentSurfaceColor()); })
+			[
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("CodexAcpSetupTitle", "内嵌 Codex ACP"))
+					.ColorAndOpacity_Lambda([this] { return FSlateColor(GetReadableAccentTextColor()); })
+					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				.Padding(0.0f, 4.0f, 0.0f, 10.0f)
+				[
+					SNew(STextBlock)
+					.Text(LOCTEXT("CodexAcpSetupDescription", "检测已固定的原生适配器；若缺失，下载项目本地的 Codex ACP、计算 SHA-256 并立即配置。"))
+					.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
+					.AutoWrapText(true)
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.FillWidth(1.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text_Lambda([this] { return FText::FromString(CodexAcpSetupStatus); })
+						.ColorAndOpacity_Lambda([this]
+						{
+							return FSlateColor(bCodexAcpConfigured ? UEBridgeMCP::Palette::Success() : UEBridgeMCP::Palette::Warning());
+						})
+						.AutoWrapText(true)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Center)
+					.Padding(12.0f, 0.0f, 0.0f, 0.0f)
+					[
+						BuildToolbarButton(
+							LOCTEXT("CodexAcpSetupButton", "检测并自动配置"),
+							FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnConfigureCodexAcpClicked),
+							TAttribute<bool>::CreateLambda([this]
+							{
+								return !bCodexAcpSetupInProgress && (!AgentBackend.IsValid() || !AgentBackend->IsProcessing());
+							}))
+					]
+				]
 			];
 	}
 
@@ -2301,175 +2651,6 @@ private:
 		return FReply::Handled();
 	}
 
-	TSharedRef<SWidget> BuildCliSettingsPanel()
-	{
-		return SNew(SBorder)
-			.Padding(12.0f)
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-			.BorderBackgroundColor_Lambda([this] { return FSlateColor(GetAccentSurfaceColor()); })
-			[
-				SNew(SVerticalBox)
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("CliSettingsTitle", "CLI 支持"))
-					.ColorAndOpacity_Lambda([this] { return FSlateColor(GetReadableAccentTextColor()); })
-					.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 4.0f, 0.0f, 12.0f)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("CliSettingsSubtitle", "配置本机 Codex CLI 与 Cursor Agent CLI。未填写时会尝试从 PATH 自动发现。"))
-					.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					BuildCliSettingsRow(ECliTool::Codex)
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 12.0f, 0.0f, 12.0f)
-				[
-					SNew(SSeparator)
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					BuildCliSettingsRow(ECliTool::Cursor)
-				]
-				+ SVerticalBox::Slot()
-				.AutoHeight()
-				.Padding(0.0f, 12.0f, 0.0f, 0.0f)
-				[
-					BuildToolbarButton(LOCTEXT("AgentBackendDiagnosticsButton", "Agent Backend Diagnostics"), FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnShowAgentBackendDiagnosticsClicked))
-				]
-			];
-	}
-
-	TSharedRef<SWidget> BuildCliSettingsRow(ECliTool Tool)
-	{
-		return SNew(SVerticalBox)
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				.VAlign(VAlign_Center)
-				[
-					SNew(SVerticalBox)
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					[
-						SNew(STextBlock)
-						.Text(GetCliTitle(Tool))
-						.ColorAndOpacity_Lambda([this] { return FSlateColor(GetReadableAccentTextColor()); })
-						.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-					]
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					.Padding(0.0f, 3.0f, 0.0f, 0.0f)
-					[
-						SNew(STextBlock)
-						.Text(GetCliDescription(Tool))
-						.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
-					]
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				[
-					BuildCliStatusBadge(Tool)
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 10.0f, 0.0f, 0.0f)
-			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				.FillWidth(1.0f)
-				.VAlign(VAlign_Center)
-				[
-					SNew(SEditableTextBox)
-					.Style(&LightTextBoxStyle)
-					.Text_Lambda([this, Tool] { return FText::FromString(GetCliConfiguredPath(Tool)); })
-					.HintText_Lambda([this, Tool]
-					{
-						return FText::FromString(FString::Printf(TEXT("留空时自动使用 PATH 中的 %s"), *GetCliCommandName(Tool)));
-					})
-					.OnTextCommitted_Lambda([this, Tool](const FText& Text, ETextCommit::Type)
-					{
-						SetCliConfiguredPath(Tool, Text.ToString());
-					})
-					.SelectAllTextWhenFocused(true)
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(8.0f, 0.0f, 0.0f, 0.0f)
-				[
-					BuildToolbarButton(LOCTEXT("DetectCliButton", "自动检测"), FOnClicked::CreateLambda([this, Tool] { return OnDetectCliClicked(Tool); }))
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
-				[
-					BuildToolbarButton(LOCTEXT("ClearCliButton", "清空"), FOnClicked::CreateLambda([this, Tool] { return OnClearCliClicked(Tool); }))
-				]
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.VAlign(VAlign_Center)
-				.Padding(6.0f, 0.0f, 0.0f, 0.0f)
-				[
-					SNew(SBox)
-					.Visibility_Lambda([this, Tool] { return IsCliAvailable(Tool) ? EVisibility::Collapsed : EVisibility::Visible; })
-					[
-						BuildToolbarButton(LOCTEXT("DownloadCliButton", "下载"), FOnClicked::CreateLambda([this, Tool] { return OnDownloadCliClicked(Tool); }))
-					]
-				]
-			]
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.Padding(0.0f, 7.0f, 0.0f, 0.0f)
-			[
-				SNew(STextBlock)
-				.Text_Lambda([this, Tool] { return GetCliPathSummary(Tool); })
-				.ColorAndOpacity_Lambda([this] { return FSlateColor(GetPanelSubduedTextColor()); })
-			];
-	}
-
-	TSharedRef<SWidget> BuildCliStatusBadge(ECliTool Tool) const
-	{
-		return SNew(SBorder)
-			.Padding(FMargin(8.0f, 2.0f))
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-			.BorderBackgroundColor_Lambda([this, Tool]
-			{
-				return FSlateColor(UEBridgeMCP::Palette::Blend(
-					GetPanelBackgroundColor(),
-					IsCliAvailable(Tool) ? UEBridgeMCP::Palette::Success() : UEBridgeMCP::Palette::Warning(),
-					0.14f));
-			})
-			[
-				SNew(STextBlock)
-				.Text_Lambda([this, Tool]
-				{
-					return IsCliAvailable(Tool) ? LOCTEXT("CliFoundStatus", "已找到") : LOCTEXT("CliMissingStatus", "未找到");
-				})
-				.ColorAndOpacity_Lambda([this, Tool]
-				{
-					return FSlateColor(IsCliAvailable(Tool) ? UEBridgeMCP::Palette::Success() : UEBridgeMCP::Palette::Warning());
-				})
-				.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-			];
-	}
-
 	TSharedRef<SWidget> BuildComposer()
 	{
 		return SNew(SBorder)
@@ -2740,150 +2921,9 @@ private:
 			];
 	}
 
-	FText GetCliTitle(ECliTool Tool) const
-	{
-		return Tool == ECliTool::Codex
-			? LOCTEXT("CodexCliTitle", "Codex CLI")
-			: LOCTEXT("CursorCliTitle", "Cursor CLI");
-	}
-
-	FText GetCliDescription(ECliTool Tool) const
-	{
-		return Tool == ECliTool::Codex
-			? LOCTEXT("CodexCliDescription", "配置 codex 命令路径；MCP 连接写入 Codex 配置。面板对话由选定 Agent Backend 承载。")
-			: LOCTEXT("CursorCliDescription", "配置 Cursor Agent CLI（cursor-agent），并同步写入 .cursor/mcp.json 供 Cursor 读取 MCP。");
-	}
-
-	FString GetCliCommandName(ECliTool Tool) const
-	{
-		return Tool == ECliTool::Codex ? TEXT("codex") : TEXT("cursor-agent");
-	}
-
-	FString GetCliConfiguredPath(ECliTool Tool) const
-	{
-		return Tool == ECliTool::Codex ? CodexCliPath : CursorCliPath;
-	}
-
-	FString GetCliDetectedPath(ECliTool Tool) const
-	{
-		return Tool == ECliTool::Codex ? DetectedCodexCliPath : DetectedCursorCliPath;
-	}
-
-	FString GetCliEffectivePath(ECliTool Tool) const
-	{
-		const FString Configured = UEBridgeMCP::StripOuterQuotes(GetCliConfiguredPath(Tool));
-		if (!Configured.IsEmpty())
-		{
-			return UEBridgeMCP::PathExists(Configured) ? Configured : FString();
-		}
-		return GetCliDetectedPath(Tool);
-	}
-
-	bool IsCliAvailable(ECliTool Tool) const
-	{
-		return !GetCliEffectivePath(Tool).IsEmpty();
-	}
-
-	FText GetCliPathSummary(ECliTool Tool) const
-	{
-		const FString EffectivePath = GetCliEffectivePath(Tool);
-		if (!EffectivePath.IsEmpty())
-		{
-			return FText::FromString(FString::Printf(TEXT("当前有效路径：%s"), *EffectivePath));
-		}
-
-		const FString Configured = UEBridgeMCP::StripOuterQuotes(GetCliConfiguredPath(Tool));
-		if (!Configured.IsEmpty())
-		{
-			return FText::FromString(FString::Printf(TEXT("已填写路径但无法访问：%s"), *Configured));
-		}
-		return FText::FromString(FString::Printf(TEXT("未检测到 %s。可以自动检测、手动填写路径，或打开下载页。"), *GetCliCommandName(Tool)));
-	}
-
-	void RefreshCliDetections()
-	{
-		DetectedCodexCliPath = UEBridgeMCP::ResolveCommandOnPath(TEXT("codex"));
-		DetectedCursorCliPath = UEBridgeMCP::ResolveCommandOnPath(TEXT("cursor-agent"));
-	}
-
-	void SetCliConfiguredPath(ECliTool Tool, const FString& NewPath)
-	{
-		FString Normalized = UEBridgeMCP::StripOuterQuotes(NewPath);
-		if (!Normalized.IsEmpty() && !UEBridgeMCP::PathExists(Normalized) && !Normalized.Contains(TEXT("\\")) && !Normalized.Contains(TEXT("/")))
-		{
-			const FString Resolved = UEBridgeMCP::ResolveCommandOnPath(Normalized);
-			if (!Resolved.IsEmpty())
-			{
-				Normalized = Resolved;
-			}
-		}
-		FPaths::MakePlatformFilename(Normalized);
-
-		if (Tool == ECliTool::Codex)
-		{
-			CodexCliPath = Normalized;
-		}
-		else
-		{
-			CursorCliPath = Normalized;
-		}
-
-		SaveSettings();
-		SetLastAction(FText::FromString(FString::Printf(TEXT("%s 路径已保存。"), *GetCliTitle(Tool).ToString())));
-	}
-
-	FReply OnDetectCliClicked(ECliTool Tool)
-	{
-		RefreshCliDetections();
-		const FString DetectedPath = GetCliDetectedPath(Tool);
-		if (DetectedPath.IsEmpty())
-		{
-			SetLastAction(FText::FromString(FString::Printf(TEXT("未在 PATH 中找到 %s。"), *GetCliCommandName(Tool))));
-			return FReply::Handled();
-		}
-
-		SetCliConfiguredPath(Tool, DetectedPath);
-		SetLastAction(FText::FromString(FString::Printf(TEXT("已检测到 %s：%s"), *GetCliCommandName(Tool), *DetectedPath)));
-		return FReply::Handled();
-	}
-
-	FReply OnClearCliClicked(ECliTool Tool)
-	{
-		if (Tool == ECliTool::Codex)
-		{
-			CodexCliPath.Empty();
-		}
-		else
-		{
-			CursorCliPath.Empty();
-		}
-
-		RefreshCliDetections();
-		SaveSettings();
-		SetLastAction(FText::FromString(FString::Printf(TEXT("%s 路径已清空，将重新使用 PATH 自动检测。"), *GetCliTitle(Tool).ToString())));
-		return FReply::Handled();
-	}
-
-	FReply OnDownloadCliClicked(ECliTool Tool)
-	{
-		const FString Url = Tool == ECliTool::Codex ? UEBridgeMCP::GetCodexCliInstallUrl() : UEBridgeMCP::GetCursorCliInstallUrl();
-		FString Error;
-		if (UEBridgeMCP::OpenExternalUrl(Url, Error))
-		{
-			SetLastAction(FText::FromString(FString::Printf(TEXT("已打开 %s 下载/安装页面。"), *GetCliTitle(Tool).ToString())));
-		}
-		else
-		{
-			SetLastAction(FText::FromString(FString::Printf(TEXT("打开下载页面失败：%s"), *Error)));
-		}
-		return FReply::Handled();
-	}
-
 	void LoadSettings()
 	{
 		SettingsColor = FLinearColor::White;
-		CodexCliPath.Empty();
-		CursorCliPath.Empty();
 
 		FString JsonText;
 		if (!FFileHelper::LoadFileToString(JsonText, *UEBridgeMCP::GetSettingsFilePath()))
@@ -2917,15 +2957,6 @@ private:
 				1.0f);
 		}
 
-		const TSharedPtr<FJsonObject>* CliObjectPtr = nullptr;
-		if (Root->TryGetObjectField(TEXT("cli"), CliObjectPtr) && CliObjectPtr && CliObjectPtr->IsValid())
-		{
-			(*CliObjectPtr)->TryGetStringField(TEXT("codexPath"), CodexCliPath);
-			(*CliObjectPtr)->TryGetStringField(TEXT("cursorPath"), CursorCliPath);
-			CodexCliPath = UEBridgeMCP::StripOuterQuotes(CodexCliPath);
-			CursorCliPath = UEBridgeMCP::StripOuterQuotes(CursorCliPath);
-		}
-
 		SaveSettings();
 	}
 
@@ -2950,13 +2981,8 @@ private:
 		ColorObject->SetNumberField(TEXT("g"), SettingsColor.G);
 		ColorObject->SetNumberField(TEXT("b"), SettingsColor.B);
 
-		TSharedPtr<FJsonObject> CliObject = MakeShared<FJsonObject>();
-		CliObject->SetStringField(TEXT("codexPath"), CodexCliPath);
-		CliObject->SetStringField(TEXT("cursorPath"), CursorCliPath);
-
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetObjectField(TEXT("color"), ColorObject);
-		Root->SetObjectField(TEXT("cli"), CliObject);
 
 		FString Out;
 		TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
@@ -3629,6 +3655,7 @@ private:
 
 	FReply OnSettingsClicked()
 	{
+		RefreshCodexAcpSetupStatus();
 		bShowSettings = true;
 		SetLastAction(LOCTEXT("SettingsOpenedAction", "已打开设置。"));
 		return FReply::Handled();
@@ -3766,6 +3793,102 @@ private:
 		return FReply::Handled();
 	}
 
+	void RefreshCodexAcpSetupStatus()
+	{
+		const FWorldDataAcpProfileConfiguration Configuration = FWorldDataCodexACPClient::GetProfileConfiguration(TEXT("codex"));
+		bCodexAcpConfigured = Configuration.bIsConfigured;
+		if (Configuration.bIsConfigured)
+		{
+			CodexAcpSetupStatus = FString::Printf(TEXT("已配置并验证：%s"), *Configuration.ExecutablePath);
+		}
+		else if (!Configuration.FailureReason.IsEmpty())
+		{
+			CodexAcpSetupStatus = FString::Printf(TEXT("需要配置：%s"), *Configuration.FailureReason);
+		}
+		else
+		{
+			CodexAcpSetupStatus = TEXT("需要配置 Codex ACP。");
+		}
+	}
+
+	FReply OnConfigureCodexAcpClicked()
+	{
+		if (bCodexAcpSetupInProgress)
+		{
+			return FReply::Handled();
+		}
+
+		RefreshCodexAcpSetupStatus();
+		if (bCodexAcpConfigured)
+		{
+			const FString BackendId = FWorldDataAgentBackendFactory::GetConfiguredBackendId();
+			if (BackendId == TEXT("auto") || BackendId == TEXT("acp_codex"))
+			{
+				RestartAgentBackend(LOCTEXT("CodexAcpAlreadyReadyAction", "Codex ACP 已验证；已重新初始化聊天后端。"));
+			}
+			else
+			{
+				SetLastAction(LOCTEXT("CodexAcpAlreadyConfiguredAction", "Codex ACP 已配置并验证。"));
+			}
+			return FReply::Handled();
+		}
+
+		bCodexAcpSetupInProgress = true;
+		CodexAcpSetupStatus = TEXT("正在检测或下载 Codex ACP…");
+		SetLastAction(LOCTEXT("CodexAcpSetupStartedAction", "正在检测 Codex ACP；若未安装将下载到项目 Saved 目录。"));
+
+		const TWeakPtr<SUEBridgeMCPPanel> WeakThis = StaticCastSharedRef<SUEBridgeMCPPanel>(AsShared());
+		Async(EAsyncExecution::ThreadPool, [WeakThis]()
+		{
+			FWorldDataCodexAcpBootstrapResult Result = FWorldDataCodexAcpBootstrap::FindOrInstall();
+			AsyncTask(ENamedThreads::GameThread, [WeakThis, Result = MoveTemp(Result)]() mutable
+			{
+				const TSharedPtr<SUEBridgeMCPPanel> Self = WeakThis.Pin();
+				if (!Self.IsValid())
+				{
+					return;
+				}
+
+				Self->bCodexAcpSetupInProgress = false;
+				if (!Result.bSuccess)
+				{
+					Self->bCodexAcpConfigured = false;
+					Self->CodexAcpSetupStatus = Result.Message.IsEmpty() ? TEXT("Codex ACP 自动配置失败。") : Result.Message;
+					Self->SetLastAction(FText::FromString(Self->CodexAcpSetupStatus));
+					UEBridgeMCP::Notify(LOCTEXT("CodexAcpSetupFailedNotification", "Codex ACP 自动配置失败。"));
+					return;
+				}
+
+				FString PinError;
+				if (!FWorldDataCodexACPClient::PinProfileExecutable(TEXT("codex"), Result.ExecutablePath, PinError))
+				{
+					Self->bCodexAcpConfigured = false;
+					Self->CodexAcpSetupStatus = FString::Printf(TEXT("适配器已找到，但安全固定失败：%s"), *PinError);
+					Self->SetLastAction(FText::FromString(Self->CodexAcpSetupStatus));
+					UEBridgeMCP::Notify(LOCTEXT("CodexAcpPinFailedNotification", "Codex ACP 的安全配置失败。"));
+					return;
+				}
+
+				Self->RefreshCodexAcpSetupStatus();
+				const FString BackendId = FWorldDataAgentBackendFactory::GetConfiguredBackendId();
+				if (BackendId == TEXT("auto") || BackendId == TEXT("acp_codex"))
+				{
+					Self->RestartAgentBackend(Result.bInstalled
+						? LOCTEXT("CodexAcpDownloadedAction", "Codex ACP 已下载、验证并配置；聊天后端已重新初始化。")
+						: LOCTEXT("CodexAcpDetectedAction", "Codex ACP 已检测、验证并配置；聊天后端已重新初始化。"));
+				}
+				else
+				{
+					Self->SetLastAction(Result.bInstalled
+						? LOCTEXT("CodexAcpDownloadedConfiguredAction", "Codex ACP 已下载、验证并配置。")
+						: LOCTEXT("CodexAcpDetectedConfiguredAction", "Codex ACP 已检测、验证并配置。"));
+				}
+				UEBridgeMCP::Notify(LOCTEXT("CodexAcpSetupCompleteNotification", "Codex ACP 已配置完成。"));
+			});
+		});
+		return FReply::Handled();
+	}
+
 	FReply OnRotateAccessTokenClicked()
 	{
 		const FText Confirmation = LOCTEXT("RotateMcpTokenConfirmation", "This revokes all active MCP sessions and replaces the token in configured local clients. Continue?");
@@ -3898,10 +4021,9 @@ private:
 	FString ConversationTranscript;
 	TArray<FConversationMessage> ConversationMessages;
 	FLinearColor SettingsColor = FLinearColor::White;
-	FString CodexCliPath;
-	FString CursorCliPath;
-	FString DetectedCodexCliPath;
-	FString DetectedCursorCliPath;
+	FString CodexAcpSetupStatus;
+	bool bCodexAcpConfigured = false;
+	bool bCodexAcpSetupInProgress = false;
 	FSlateRoundedBoxBrush HtmlShellBrush{ FLinearColor::White, 20.0f };
 	FSlateRoundedBoxBrush HtmlLargeCardBrush{ FLinearColor::White, 16.0f };
 	FSlateRoundedBoxBrush HtmlCardBrush{ FLinearColor::White, 12.0f };
@@ -3932,6 +4054,7 @@ private:
 	TSharedPtr<STextBlock> DetailTitleText;
 	TSharedPtr<SMultiLineEditableTextBox> DetailTextBox;
 	TSharedPtr<SMultiLineEditableTextBox> ComposerTextBox;
+	TSharedPtr<SEditableTextBox> ModelTextBox;
 };
 
 TSharedRef<SWidget> CreateUEBridgeMCPPanel()

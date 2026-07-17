@@ -57,13 +57,44 @@ namespace
 		return true;
 	}
 
-	static FWorldDataTrustedAdapterSettings GetTrustedAdapterSettings()
+	static FString NormalizeAdapterProfile(FString Profile)
+	{
+		Profile.TrimStartAndEndInline();
+		Profile.ToLowerInline();
+		return Profile == TEXT("cursor") || Profile == TEXT("claude") ? Profile : TEXT("codex");
+	}
+
+	static void GetAdapterConfigurationKeys(const FString& Profile, const TCHAR*& OutExecutableKey, const TCHAR*& OutSha256Key)
+	{
+		const FString NormalizedProfile = NormalizeAdapterProfile(Profile);
+		OutExecutableKey = NormalizedProfile == TEXT("cursor")
+			? TEXT("CursorAcpAdapterExecutable")
+			: (NormalizedProfile == TEXT("claude") ? TEXT("ClaudeAcpAdapterExecutable") : TEXT("CodexAcpAdapterExecutable"));
+		OutSha256Key = NormalizedProfile == TEXT("cursor")
+			? TEXT("CursorAcpAdapterSha256")
+			: (NormalizedProfile == TEXT("claude") ? TEXT("ClaudeAcpAdapterSha256") : TEXT("CodexAcpAdapterSha256"));
+	}
+
+	static FWorldDataTrustedAdapterSettings GetTrustedAdapterSettings(const FString& Profile)
 	{
 		FWorldDataTrustedAdapterSettings Settings;
 		if (GConfig)
 		{
-			GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterExecutable"), Settings.ExecutablePath, GGameIni);
-			GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterSha256"), Settings.ExpectedSha256, GGameIni);
+			const FString NormalizedProfile = NormalizeAdapterProfile(Profile);
+			const TCHAR* ExecutableKey = nullptr;
+			const TCHAR* Sha256Key = nullptr;
+			GetAdapterConfigurationKeys(NormalizedProfile, ExecutableKey, Sha256Key);
+			GConfig->GetString(TEXT("UEBridgeMCP.Security"), ExecutableKey, Settings.ExecutablePath, GGameIni);
+			GConfig->GetString(TEXT("UEBridgeMCP.Security"), Sha256Key, Settings.ExpectedSha256, GGameIni);
+
+			// Preserve the original secure ACP configuration as the Codex profile
+			// during migration. Cursor and Claude never fall back to this generic
+			// executable, because the selected product must be explicit.
+			if (NormalizedProfile == TEXT("codex") && Settings.ExecutablePath.IsEmpty())
+			{
+				GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterExecutable"), Settings.ExecutablePath, GGameIni);
+				GConfig->GetString(TEXT("UEBridgeMCP.Security"), TEXT("AcpAdapterSha256"), Settings.ExpectedSha256, GGameIni);
+			}
 		}
 		Settings.ExecutablePath.TrimStartAndEndInline();
 		Settings.ExpectedSha256.TrimStartAndEndInline();
@@ -377,9 +408,115 @@ namespace
 	}
 }
 
+FWorldDataCodexACPClient::FWorldDataCodexACPClient(const FString& InAdapterProfile)
+	: AdapterProfile(NormalizeAdapterProfile(InAdapterProfile))
+{
+}
+
 FWorldDataCodexACPClient::~FWorldDataCodexACPClient()
 {
 	Stop();
+}
+
+bool FWorldDataCodexACPClient::IsProfileConfigured(const FString& Profile)
+{
+	return GetProfileConfiguration(Profile).bIsConfigured;
+}
+
+FWorldDataAcpProfileConfiguration FWorldDataCodexACPClient::GetProfileConfiguration(const FString& Profile)
+{
+	FWorldDataAcpProfileConfiguration Result;
+	const FWorldDataTrustedAdapterSettings Settings = GetTrustedAdapterSettings(Profile);
+	Result.ExecutablePath = Settings.ExecutablePath;
+	Result.ExpectedSha256 = Settings.ExpectedSha256;
+
+	if (Settings.ExecutablePath.IsEmpty())
+	{
+		Result.FailureReason = TEXT("No executable is pinned.");
+		return Result;
+	}
+	if (FPaths::IsRelative(Settings.ExecutablePath))
+	{
+		Result.FailureReason = TEXT("The configured executable path must be absolute.");
+		return Result;
+	}
+	if (!IsHexSha256(Settings.ExpectedSha256))
+	{
+		Result.FailureReason = TEXT("No valid SHA-256 pin is configured.");
+		return Result;
+	}
+
+	FWorldDataCodexAcpLaunchSpec LaunchSpec;
+	if (!BuildLaunchSpecForAdapterPath(Settings.ExecutablePath, LaunchSpec))
+	{
+		Result.FailureReason = TEXT("The configured adapter is missing or is not a native executable.");
+		return Result;
+	}
+	if (!TryGetFileSha256(LaunchSpec.Executable, Result.ActualSha256))
+	{
+		Result.FailureReason = TEXT("The configured adapter could not be hashed.");
+		return Result;
+	}
+	if (!Result.ActualSha256.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase))
+	{
+		Result.FailureReason = TEXT("The configured adapter SHA-256 does not match its pin.");
+		return Result;
+	}
+
+	Result.ExecutablePath = LaunchSpec.DisplayPath;
+	Result.bIsConfigured = true;
+	return Result;
+}
+
+bool FWorldDataCodexACPClient::PinProfileExecutable(const FString& Profile, const FString& ExecutablePath, FString& OutError)
+{
+	OutError.Empty();
+	if (!GConfig)
+	{
+		OutError = TEXT("UE configuration is unavailable.");
+		return false;
+	}
+	if (ExecutablePath.IsEmpty() || FPaths::IsRelative(ExecutablePath))
+	{
+		OutError = TEXT("The adapter executable must use an absolute path.");
+		return false;
+	}
+
+	FWorldDataCodexAcpLaunchSpec LaunchSpec;
+	if (!BuildLaunchSpecForAdapterPath(ExecutablePath, LaunchSpec))
+	{
+		OutError = TEXT("The adapter must be an existing native executable; scripts and PATH shims are not accepted.");
+		return false;
+	}
+
+	FString Sha256;
+	if (!TryGetFileSha256(LaunchSpec.Executable, Sha256))
+	{
+		OutError = TEXT("Could not calculate the adapter SHA-256.");
+		return false;
+	}
+
+	const TCHAR* ExecutableKey = nullptr;
+	const TCHAR* Sha256Key = nullptr;
+	GetAdapterConfigurationKeys(Profile, ExecutableKey, Sha256Key);
+	GConfig->SetString(TEXT("UEBridgeMCP.Security"), ExecutableKey, *LaunchSpec.DisplayPath, GGameIni);
+	GConfig->SetString(TEXT("UEBridgeMCP.Security"), Sha256Key, *Sha256, GGameIni);
+	GConfig->Flush(false, GGameIni);
+	return true;
+}
+
+FString FWorldDataCodexACPClient::GetProfileDisplayName(const FString& Profile)
+{
+	const FString NormalizedProfile = NormalizeAdapterProfile(Profile);
+	if (NormalizedProfile == TEXT("cursor"))
+	{
+		return TEXT("Cursor");
+	}
+	if (NormalizedProfile == TEXT("claude"))
+	{
+		return TEXT("Claude Code");
+	}
+	return TEXT("Codex");
 }
 
 void FWorldDataCodexACPClient::SendPrompt(const FString& Prompt)
@@ -494,7 +631,9 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 	FWorldDataCodexAcpLaunchSpec LaunchSpec;
 	if (!FindAdapterLaunch(LaunchSpec))
 	{
-		Fail(TEXT("没有找到受信任的 ACP adapter。请在 [UEBridgeMCP.Security] 中同时配置绝对路径 AcpAdapterExecutable 和该文件的 AcpAdapterSha256。PATH、.cmd/.bat/.ps1 和自动目录扫描已出于安全原因禁用。"));
+		const FString ProfileName = GetProfileDisplayName(AdapterProfile);
+		const FString Prefix = AdapterProfile == TEXT("cursor") ? TEXT("Cursor") : (AdapterProfile == TEXT("claude") ? TEXT("Claude") : TEXT("Codex"));
+		Fail(FString::Printf(TEXT("No trusted %s ACP adapter is configured. Set absolute [UEBridgeMCP.Security] %sAcpAdapterExecutable and its matching %sAcpAdapterSha256; PATH and script shims are not used."), *ProfileName, *Prefix, *Prefix));
 		return false;
 	}
 
@@ -555,7 +694,7 @@ bool FWorldDataCodexACPClient::EnsureProcess()
 		return false;
 	}
 
-	EmitStatus(FString::Printf(TEXT("已启动 codex-acp：%s"), *ActiveAdapterDisplayPath));
+	EmitStatus(FString::Printf(TEXT("Started %s: %s"), *GetDisplayName(), *ActiveAdapterDisplayPath));
 
 	TSharedPtr<FJsonObject> Params = MakeShared<FJsonObject>();
 	Params->SetNumberField(TEXT("protocolVersion"), 1);
@@ -614,7 +753,7 @@ bool FWorldDataCodexACPClient::StartSessionIfReady()
 
 	bCreatingSession = true;
 	SessionRpcId = SendRpc(TEXT("session/new"), Params);
-	EmitStatus(TEXT("正在创建 Codex ACP 会话..."));
+	EmitStatus(FString::Printf(TEXT("Creating %s session..."), *GetDisplayName()));
 	return false;
 }
 
@@ -648,7 +787,7 @@ void FWorldDataCodexACPClient::SendPendingPromptIfReady()
 	PendingPrompt.Empty();
 	bPromptInFlight = true;
 	PromptRpcId = SendRpc(TEXT("session/prompt"), Params);
-	EmitStatus(TEXT("已发送到 Codex，等待回复..."));
+	EmitStatus(FString::Printf(TEXT("Prompt sent to %s; waiting for response..."), *GetDisplayName()));
 }
 
 int32 FWorldDataCodexACPClient::SendRpc(const FString& Method, const TSharedPtr<FJsonObject>& Params)
@@ -896,7 +1035,7 @@ void FWorldDataCodexACPClient::HandleRpcResponse(int32 Id, const TSharedPtr<FJso
 			Fail(TEXT("session/new 没有返回 sessionId，可能是 codex-acp 协议版本不匹配。"));
 			return;
 		}
-		EmitStatus(TEXT("Codex ACP 会话已创建。"));
+		EmitStatus(FString::Printf(TEXT("%s session created."), *GetDisplayName()));
 		SendPendingPromptIfReady();
 		return;
 	}
@@ -1095,7 +1234,7 @@ void FWorldDataCodexACPClient::HandleSessionUpdate(const FString& AcpSessionId, 
 
 bool FWorldDataCodexACPClient::FindAdapterLaunch(FWorldDataCodexAcpLaunchSpec& OutLaunchSpec) const
 {
-	const FWorldDataTrustedAdapterSettings Settings = GetTrustedAdapterSettings();
+	const FWorldDataTrustedAdapterSettings Settings = GetTrustedAdapterSettings(AdapterProfile);
 	if (Settings.ExecutablePath.IsEmpty() || Settings.ExpectedSha256.IsEmpty() || !IsHexSha256(Settings.ExpectedSha256))
 	{
 		return false;

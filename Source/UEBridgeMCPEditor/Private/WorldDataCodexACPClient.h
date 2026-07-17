@@ -13,13 +13,31 @@ struct FWorldDataCodexAcpLaunchSpec
 	FString DisplayPath;
 };
 
+// This reports the effective, verified configuration for one adapter profile.
+// It is intentionally distinct from a candidate discovered by the setup UI:
+// only a native executable whose SHA-256 matches this record is launchable.
+struct FWorldDataAcpProfileConfiguration
+{
+	bool bIsConfigured = false;
+	FString ExecutablePath;
+	FString ExpectedSha256;
+	FString ActualSha256;
+	FString FailureReason;
+};
+
 class FWorldDataCodexACPClient : public IWorldDataAgentBackend, public TSharedFromThis<FWorldDataCodexACPClient>
 {
 public:
+	explicit FWorldDataCodexACPClient(const FString& InAdapterProfile = TEXT("codex"));
 	~FWorldDataCodexACPClient();
 
-	virtual FString GetBackendId() const override { return TEXT("acp"); }
-	virtual FString GetDisplayName() const override { return TEXT("ACP Adapter (compatibility)"); }
+	static bool IsProfileConfigured(const FString& Profile);
+	static FWorldDataAcpProfileConfiguration GetProfileConfiguration(const FString& Profile);
+	static bool PinProfileExecutable(const FString& Profile, const FString& ExecutablePath, FString& OutError);
+	static FString GetProfileDisplayName(const FString& Profile);
+
+	virtual FString GetBackendId() const override { return FString::Printf(TEXT("acp_%s"), *AdapterProfile); }
+	virtual FString GetDisplayName() const override { return GetProfileDisplayName(AdapterProfile) + TEXT(" ACP"); }
 	virtual FWorldDataAgentBackendCapabilities GetCapabilities() const override
 	{
 		FWorldDataAgentBackendCapabilities Capabilities;
@@ -71,6 +89,7 @@ private:
 	FString ActiveAdapterDisplayPath;
 	FString ContextTaskId;
 	FString ContextThreadId;
+	FString AdapterProfile;
 	FWorldDataAgentMcpConnection McpConnection;
 	EWorldDataCodexPermissionMode PermissionMode = EWorldDataCodexPermissionMode::Default;
 

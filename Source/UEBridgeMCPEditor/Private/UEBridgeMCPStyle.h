@@ -6,7 +6,6 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Framework/Notifications/NotificationManager.h"
-#include "HAL/FileManager.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/Paths.h"
@@ -115,76 +114,6 @@ namespace UEBridgeMCP
 		{
 			FPlatformProcess::ExploreFolder(*Folder);
 		}
-	}
-
-	static FString StripOuterQuotes(const FString& Text)
-	{
-		FString Trimmed = Text;
-		Trimmed.TrimStartAndEndInline();
-		if (Trimmed.Len() >= 2 && Trimmed[0] == TCHAR('"') && Trimmed[Trimmed.Len() - 1] == TCHAR('"'))
-		{
-			Trimmed = Trimmed.Mid(1, Trimmed.Len() - 2);
-			Trimmed.TrimStartAndEndInline();
-		}
-		return Trimmed;
-	}
-
-	static bool PathExists(const FString& Path)
-	{
-		const FString Trimmed = StripOuterQuotes(Path);
-		return !Trimmed.IsEmpty() && (FPaths::FileExists(Trimmed) || IFileManager::Get().FileSize(*Trimmed) >= 0);
-	}
-
-	static FString ResolveCommandOnPath(const FString& Command)
-	{
-		const FString TrimmedCommand = StripOuterQuotes(Command);
-		if (TrimmedCommand.IsEmpty())
-		{
-			return FString();
-		}
-
-		int32 ReturnCode = 1;
-		FString StdOut;
-		FString StdErr;
-#if PLATFORM_WINDOWS
-		FPlatformProcess::ExecProcess(TEXT("where.exe"), *TrimmedCommand, &ReturnCode, &StdOut, &StdErr);
-#else
-		FPlatformProcess::ExecProcess(TEXT("which"), *TrimmedCommand, &ReturnCode, &StdOut, &StdErr);
-#endif
-		if (ReturnCode != 0)
-		{
-			return FString();
-		}
-
-		TArray<FString> Lines;
-		StdOut.ParseIntoArrayLines(Lines, true);
-		for (FString Line : Lines)
-		{
-			Line.TrimStartAndEndInline();
-			if (PathExists(Line))
-			{
-				FPaths::MakePlatformFilename(Line);
-				return Line;
-			}
-		}
-		return FString();
-	}
-
-	static bool OpenExternalUrl(const FString& Url, FString& OutError)
-	{
-		OutError.Empty();
-		FPlatformProcess::LaunchURL(*Url, nullptr, &OutError);
-		return OutError.IsEmpty();
-	}
-
-	static FString GetCodexCliInstallUrl()
-	{
-		return TEXT("https://help.openai.com/en/articles/11096431");
-	}
-
-	static FString GetCursorCliInstallUrl()
-	{
-		return TEXT("https://docs.cursor.com/en/cli/installation");
 	}
 
 	static FString PrettyJson(const FString& JsonText)

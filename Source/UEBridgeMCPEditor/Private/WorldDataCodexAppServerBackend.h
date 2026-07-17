@@ -13,6 +13,8 @@ public:
 	~FWorldDataCodexAppServerBackend();
 
 	static bool IsConfigured();
+	static FString GetConfiguredModel();
+	static void SetConfiguredModel(const FString& Model);
 
 	virtual FString GetBackendId() const override { return TEXT("codex_app_server"); }
 	virtual FString GetDisplayName() const override { return TEXT("Codex app-server"); }

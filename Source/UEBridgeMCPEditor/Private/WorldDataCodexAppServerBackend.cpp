@@ -161,6 +161,20 @@ namespace
 		const TSharedPtr<FJsonObject>* Value = nullptr;
 		return Object.IsValid() && Object->TryGetObjectField(Name, Value) && Value && Value->IsValid() ? *Value : nullptr;
 	}
+
+	static FString GetAppServerModeInstruction(EWorldDataCodexPermissionMode Mode)
+	{
+		switch (Mode)
+		{
+		case EWorldDataCodexPermissionMode::Plan:
+			return TEXT("Host execution mode: Plan. Do not call tools or make project changes; provide an actionable plan only.");
+		case EWorldDataCodexPermissionMode::Bypass:
+			return TEXT("Host execution mode: Bypass. You may use available MCP tools without waiting for extra host approval. UE MCP capability, revision, and high-risk approval policies still apply.");
+		case EWorldDataCodexPermissionMode::Default:
+		default:
+			return TEXT("Host execution mode: Default. Follow normal permission and approval flows. UE MCP capability, revision, and high-risk approval policies still apply.");
+		}
+	}
 }
 
 FWorldDataCodexAppServerBackend::~FWorldDataCodexAppServerBackend()
@@ -185,12 +199,31 @@ bool FWorldDataCodexAppServerBackend::IsConfigured()
 		&& ActualHash.Equals(Settings.ExpectedSha256, ESearchCase::IgnoreCase);
 }
 
+FString FWorldDataCodexAppServerBackend::GetConfiguredModel()
+{
+	return GetSettings().Model;
+}
+
+void FWorldDataCodexAppServerBackend::SetConfiguredModel(const FString& Model)
+{
+	if (!GConfig)
+	{
+		return;
+	}
+	FString SanitizedModel = Model;
+	SanitizedModel.TrimStartAndEndInline();
+	SanitizedModel.LeftInline(128);
+	GConfig->SetString(TEXT("UEBridgeMCP.Agent"), TEXT("CodexAppServerModel"), *SanitizedModel, GGameIni);
+	GConfig->Flush(false, GGameIni);
+}
+
 FWorldDataAgentBackendCapabilities FWorldDataCodexAppServerBackend::GetCapabilities() const
 {
 	FWorldDataAgentBackendCapabilities Capabilities;
-	// The backend can read a project-configured model for thread/start, but the
-	// panel does not yet expose a verified runtime model-switching control.
-	Capabilities.bSupportsModelSelection = false;
+	// The selected model is written to the project configuration and is applied
+	// when a fresh app-server thread is created. We do not claim that an active
+	// thread can switch models in place.
+	Capabilities.bSupportsModelSelection = true;
 	Capabilities.bUsesNativeMcpConfiguration = true;
 	// Do not advertise attachment or approval schema support until it has been
 	// validated against the exact installed app-server schema.
@@ -393,7 +426,7 @@ void FWorldDataCodexAppServerBackend::StartTurnIfReady()
 	TArray<TSharedPtr<FJsonValue>> Input;
 	TSharedRef<FJsonObject> TextInput = MakeShared<FJsonObject>();
 	TextInput->SetStringField(TEXT("type"), TEXT("text"));
-	TextInput->SetStringField(TEXT("text"), PendingPrompt);
+	TextInput->SetStringField(TEXT("text"), FString(TEXT("You are assisting inside Unreal Editor. Prefer the configured WorldData MCP tools/resources when relevant.\n")) + GetAppServerModeInstruction(PermissionMode) + TEXT("\n\n---\nUser message:\n") + PendingPrompt);
 	Input.Add(MakeShared<FJsonValueObject>(TextInput));
 	Params->SetArrayField(TEXT("input"), Input);
 	PendingPrompt.Empty();
