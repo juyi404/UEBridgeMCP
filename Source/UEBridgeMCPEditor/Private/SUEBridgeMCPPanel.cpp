@@ -4,6 +4,7 @@
 #include "UEBridgeMCPAgentController.h"
 #include "UEBridgeMCPApprovalController.h"
 #include "UEBridgeMCPCoreModule.h"
+#include "UEBridgeMCPPanelViewModel.h"
 #include "WorldDataAgentBackendFactory.h"
 #include "UEBridgeMCPStyle.h"
 
@@ -51,11 +52,9 @@ public:
 
 	void Construct(const FArguments& InArgs)
 	{
-		LastAction = LOCTEXT("InitialLastAction", "新会话已就绪。");
+		ViewModel = MakeUnique<FUEBridgeMCPPanelViewModel>();
+		ViewModel->Initialize(LOCTEXT("InitialLastAction", "新会话已就绪。"));
 		LoadSettings();
-		ServerPortText = FString::FromInt(GetWorldDataMCPService().IsRunning()
-			? GetWorldDataMCPService().GetPort()
-			: GetWorldDataMCPService().LoadConfiguredPort());
 		RefreshCliDetections();
 		ConfigureLightTextBoxStyle();
 		ConfigureComposerButtonStyle();
@@ -2172,10 +2171,10 @@ private:
 						SNew(SEditableTextBox)
 						.Style(&LightTextBoxStyle)
 						.IsEnabled_Lambda([this] { return !GetWorldDataMCPService().IsRunning(); })
-						.Text_Lambda([this] { return FText::FromString(ServerPortText); })
+						.Text_Lambda([this] { return FText::FromString(ViewModel->ServerPortText); })
 						.HintText(LOCTEXT("McpPortHint", "例如 7275"))
-						.OnTextChanged_Lambda([this](const FText& Text) { ServerPortText = Text.ToString(); })
-						.OnTextCommitted_Lambda([this](const FText& Text, ETextCommit::Type) { ServerPortText = Text.ToString(); })
+						.OnTextChanged_Lambda([this](const FText& Text) { ViewModel->ServerPortText = Text.ToString(); })
+						.OnTextCommitted_Lambda([this](const FText& Text, ETextCommit::Type) { ViewModel->ServerPortText = Text.ToString(); })
 						.SelectAllTextWhenFocused(true)
 					]
 					+ SHorizontalBox::Slot()
@@ -2279,7 +2278,7 @@ private:
 
 	int32 ParseServerPort() const
 	{
-		const int32 Port = FCString::Atoi(*ServerPortText);
+		const int32 Port = FCString::Atoi(*ViewModel->ServerPortText);
 		return (Port >= 1024 && Port <= 65535) ? Port : GetWorldDataMCPService().LoadConfiguredPort();
 	}
 
@@ -2324,7 +2323,7 @@ private:
 		if (GetWorldDataMCPService().IsRunning())
 		{
 			GetWorldDataMCPService().RefreshConnectionFiles();
-			ServerPortText = FString::FromInt(GetWorldDataMCPService().GetPort());
+			ViewModel->ServerPortText = FString::FromInt(GetWorldDataMCPService().GetPort());
 			SetLastAction(LOCTEXT("McpStartedAction", "已启动 MCP 服务器。"));
 		}
 		else
@@ -2346,7 +2345,7 @@ private:
 		if (GetWorldDataMCPService().IsRunning())
 		{
 			GetWorldDataMCPService().RefreshConnectionFiles();
-			ServerPortText = FString::FromInt(GetWorldDataMCPService().GetPort());
+			ViewModel->ServerPortText = FString::FromInt(GetWorldDataMCPService().GetPort());
 			SetLastAction(FText::Format(
 				LOCTEXT("McpPortAppliedAction", "已在端口 {0} 启动。"),
 				FText::FromString(FString::FromInt(GetWorldDataMCPService().GetPort()))));
@@ -3082,7 +3081,7 @@ private:
 		bShowSettings = false;
 		bShowDetail = true;
 		bDetailIsConversation = false;
-		CurrentDetailText = PrettyText;
+		ViewModel->CurrentDetailText = PrettyText;
 		if (DetailTitleText.IsValid())
 		{
 			DetailTitleText->SetText(Title);
@@ -3095,7 +3094,7 @@ private:
 
 	void SetLastAction(const FText& Text)
 	{
-		LastAction = Text;
+		ViewModel->LastAction = Text;
 	}
 
 	void RebuildConversationMessages()
@@ -3335,7 +3334,7 @@ private:
 		bShowSettings = false;
 		bShowDetail = true;
 		bDetailIsConversation = true;
-		CurrentDetailText = ConversationTranscript;
+		ViewModel->CurrentDetailText = ConversationTranscript;
 		if (DetailTitleText.IsValid())
 		{
 			DetailTitleText->SetText(LOCTEXT("CodexConversationTitle", "Codex 会话"));
@@ -3455,7 +3454,7 @@ private:
 		bShowDetail = false;
 		bDetailIsConversation = false;
 		ClearPendingPermission();
-		CurrentDetailText.Empty();
+		ViewModel->CurrentDetailText.Empty();
 		ConversationTranscript.Empty();
 		ConversationMessages.Empty();
 		ActiveAssistantMessageIndex = INDEX_NONE;
@@ -3508,7 +3507,7 @@ private:
 		ConversationTranscript = Conversation.Transcript;
 		ActiveAssistantMessageIndex = Conversation.ActiveAssistantMessageIndex;
 		TrimConversationHistory();
-		CurrentDetailText = ConversationTranscript;
+		ViewModel->CurrentDetailText = ConversationTranscript;
 
 		bShowSettings = false;
 		bShowDetail = ConversationMessages.Num() > 0;
@@ -3928,9 +3927,9 @@ private:
 
 	FReply OnCopyCurrentClicked()
 	{
-		if (!CurrentDetailText.IsEmpty())
+		if (!ViewModel->CurrentDetailText.IsEmpty())
 		{
-			UEBridgeMCP::CopyToClipboard(CurrentDetailText);
+			UEBridgeMCP::CopyToClipboard(ViewModel->CurrentDetailText);
 			SetLastAction(LOCTEXT("CopiedViewAction", "已复制当前内容。"));
 			UEBridgeMCP::Notify(LOCTEXT("CopiedViewNotification", "当前面板内容已复制。"));
 		}
@@ -3951,8 +3950,7 @@ private:
 		return FReply::Handled();
 	}
 
-	FText LastAction;
-	FString CurrentDetailText;
+	TUniquePtr<FUEBridgeMCPPanelViewModel> ViewModel;
 	FString ConversationTranscript;
 	TArray<FConversationMessage> ConversationMessages;
 	FLinearColor SettingsColor = FLinearColor::White;
@@ -3986,7 +3984,6 @@ private:
 	TSharedPtr<SScrollBox> SidebarListScrollBox;
 	TArray<FConversation> Conversations;
 	int32 ActiveConversationIndex = INDEX_NONE;
-	FString ServerPortText;
 	TArray<FString> CachedToolNames;
 	TSharedPtr<STextBlock> DetailTitleText;
 	TSharedPtr<SMultiLineEditableTextBox> DetailTextBox;
