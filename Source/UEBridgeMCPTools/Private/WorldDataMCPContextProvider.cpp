@@ -2,12 +2,13 @@
 
 #include "WorldDataMCPToolRegistry.h"
 
+#include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Editor.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
-#include "Misc/SecureHash.h"
+#include "Misc/Crc.h"
 #include "UObject/Package.h"
 #include "UObject/SoftObjectPath.h"
 
@@ -15,7 +16,10 @@ namespace
 {
 	FString MakeRevisionHash(const FString& Value)
 	{
-		return FMD5::HashAnsiString(*Value).ToLower();
+		const FTCHARToUTF8 Utf8(*Value);
+		// Revisions are optimistic-concurrency tokens, not security primitives.
+		// Use the portable CRC implementation instead of a platform hash hook.
+		return FString::Printf(TEXT("crc32-%08x-%d"), FCrc::MemCrc32(Utf8.Get(), Utf8.Length()), Utf8.Length());
 	}
 
 	FString MakeTargetSummary(const TSharedPtr<FJsonObject>& Arguments)

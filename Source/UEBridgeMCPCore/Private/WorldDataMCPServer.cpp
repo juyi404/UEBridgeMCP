@@ -3,6 +3,7 @@
 #include "Algo/AllOf.h"
 #include "Async/Async.h"
 #include "Async/Future.h"
+#include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "HAL/Event.h"
@@ -21,7 +22,6 @@
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
-#include "Misc/SecureHash.h"
 #include "Modules/ModuleManager.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -365,7 +365,9 @@ namespace
 
 	static FString MakeNonSecretHash(const FString& Value)
 	{
-		return FMD5::HashAnsiString(*Value).ToLower();
+		const FTCHARToUTF8 Utf8(*Value);
+		// This detects stale approval targets; it is not a security credential.
+		return FString::Printf(TEXT("crc32-%08x-%d"), FCrc::MemCrc32(Utf8.Get(), Utf8.Length()), Utf8.Length());
 	}
 
 	static FString CaptureWorldRevision()
