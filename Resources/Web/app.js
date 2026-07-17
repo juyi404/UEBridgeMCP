@@ -20,6 +20,70 @@
   let previousConversationSignature = "";
 
   const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[char]);
+  function renderInlineMarkdown(value) {
+    return escapeHtml(value)
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  }
+
+  function renderMarkdown(value = "") {
+    const lines = String(value).replace(/\r\n?/g, "\n").split("\n");
+    const output = [];
+    let code = null;
+    let list = null;
+    const closeList = () => {
+      if (!list) return;
+      output.push(`</${list}>`);
+      list = null;
+    };
+
+    for (const line of lines) {
+      if (/^```/.test(line)) {
+        closeList();
+        if (code) {
+          output.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+          code = null;
+        } else {
+          code = [];
+        }
+        continue;
+      }
+      if (code) {
+        code.push(line);
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,4})\s+(.+)$/);
+      if (heading) {
+        closeList();
+        const level = Math.min(heading[1].length + 2, 6);
+        output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+        continue;
+      }
+      const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+      const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      if (unordered || ordered) {
+        const nextList = unordered ? "ul" : "ol";
+        if (list !== nextList) {
+          closeList();
+          list = nextList;
+          output.push(`<${list}>`);
+        }
+        output.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`);
+        continue;
+      }
+      closeList();
+      if (line.trim()) output.push(`<p>${renderInlineMarkdown(line)}</p>`);
+    }
+    closeList();
+    if (code) output.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+    return output.join("");
+  }
+
+  function threadStatusLabel(status) {
+    const labels = Object.freeze({ loaded: "已加载", active: "进行中", idle: "空闲", systemError: "异常" });
+    return labels[status] || "";
+  }
   const bridge = () => window.ue && window.ue.worlddata;
   async function invoke(method, ...args) {
     const api = bridge();
@@ -67,7 +131,7 @@
     elements.threadCount.textContent = `${next.threads.length} 个会话`;
     elements.threadList.innerHTML = next.threads.map(thread => {
       const title = thread.title || thread.preview || "新对话";
-      return `<button class="thread-item ${thread.id === next.activeThreadId ? "active" : ""}" data-thread-id="${escapeHtml(thread.id)}"><span class="thread-title">${escapeHtml(title)}</span><span class="thread-meta"><span>${escapeHtml(thread.status || "")}</span><span>${relativeTime(thread.updatedAt)}</span></span></button>`;
+      return `<button class="thread-item ${thread.id === next.activeThreadId ? "active" : ""}" data-thread-id="${escapeHtml(thread.id)}"><span class="thread-title">${escapeHtml(title)}</span><span class="thread-meta"><span>${escapeHtml(threadStatusLabel(thread.status))}</span><span>${relativeTime(thread.updatedAt)}</span></span></button>`;
     }).join("") || `<div class="thread-meta" style="padding:12px">暂无本项目会话</div>`;
   }
 
@@ -89,7 +153,10 @@
     elements.messageList.innerHTML = next.conversation.map(item => {
       if (item.kind === "tool") return `<div class="tool-card ${escapeHtml(item.status)}"><span class="tool-state"></span><strong>${escapeHtml(item.toolName || "工具调用")}</strong><span>${escapeHtml(item.status || item.text || "")}</span></div>`;
       const role = item.role === "user" ? "user" : "assistant";
-      return `<article class="message ${role}"><div class="message-label">${role === "user" ? "你" : "CODEX"}</div>${escapeHtml(item.text)}</article>`;
+      const body = role === "user"
+        ? `<div class="message-body">${escapeHtml(item.text)}</div>`
+        : `<div class="message-markdown">${renderMarkdown(item.text)}</div>`;
+      return `<article class="message ${role}"><div class="message-label">${role === "user" ? "你" : "CODEX"}</div>${body}</article>`;
     }).join("");
     if (wasNearBottom) elements.messageList.scrollTop = elements.messageList.scrollHeight;
   }
@@ -100,7 +167,7 @@
     const configured = runtime.configured && runtime.verified;
     elements.settingsContent.innerHTML = `
       <article class="settings-card">
-        <div class="settings-card-head"><div><h3>Codex 后端运行时</h3><p>自动发现或安装受支持的原生 Codex，生成协议 schema，并按 SHA-256 固定到当前项目。</p></div><span class="pill ${configured ? "ready" : "neutral"}">${configured ? "已配置" : "未配置"}</span></div>
+        <div class="settings-card-head"><div><h3>Codex 后端运行时</h3><p>自动发现受支持的原生 Codex、复制到托管目录、生成协议 schema，并按 SHA-256 固定到当前项目。</p></div><span class="pill ${configured ? "ready" : "neutral"}">${configured ? "已配置" : "未配置"}</span></div>
         <div class="status-box"><div class="status-copy"><strong>${configured ? "配置已保存，后续启动自动使用" : "点击一次即可完成发现、复制、校验与连接"}</strong><code>${escapeHtml(runtime.manifestPath || "尚未生成运行时清单")}</code></div><button id="configure-runtime" class="send-button" ${next.configuring ? "disabled" : ""}>${next.configuring ? "正在配置…" : (configured ? "重新校验配置" : "一键自动配置")}</button></div>
         <div class="hash-grid"><div class="hash-cell"><span>Agent Host · ${escapeHtml(runtime.hostVersion || "待配置")}</span><code>${escapeHtml(runtime.hostSha256 || "—")}</code></div><div class="hash-cell"><span>Codex · ${escapeHtml(runtime.codexVersion || "待配置")}</span><code>${escapeHtml(runtime.codexSha256 || "—")}</code></div></div>
       </article>
