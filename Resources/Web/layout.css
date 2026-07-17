@@ -46,6 +46,8 @@ body {
 #chat-view .messages {
   min-height: 0;
   flex: 1 1 auto;
+  align-content: start;
+  grid-auto-rows: max-content;
   overflow-y: auto;
   padding: 0 4px 12px 0;
   scrollbar-color: #dce5f2 transparent;

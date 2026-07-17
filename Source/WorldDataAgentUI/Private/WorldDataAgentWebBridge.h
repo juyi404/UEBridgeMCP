@@ -37,6 +37,8 @@ public:
 
 private:
 	void HandleAgentEvent(const FWorldDataAgentEvent& Event);
+	void AddDraftConversation();
+	void BindDraftConversation(const FString& ThreadId);
 	void StartThreadForPendingMessage();
 	void SendTurn(const FString& Text);
 	void SetUiError(const FString& Code, const FString& Message);
@@ -52,4 +54,5 @@ private:
 	FString UiErrorMessage;
 	bool bConfiguring = false;
 	bool bBusy = false;
+	bool bActiveThreadIsDraft = false;
 };

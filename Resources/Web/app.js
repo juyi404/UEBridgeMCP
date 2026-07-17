@@ -247,12 +247,13 @@
   document.querySelector("#top-settings").addEventListener("click", () => setRoute("settings"));
   document.querySelector("#back-chat").addEventListener("click", () => setRoute("chat"));
   document.querySelector("#refresh").addEventListener("click", () => invoke("refreshthreads").catch(console.error));
-  document.querySelector("#new-chat").addEventListener("click", async () => { await invoke("newconversation"); setRoute("chat"); elements.messageInput.focus(); });
+  document.querySelector("#new-chat").addEventListener("click", async () => { await invoke("newconversation"); setRoute("chat"); await poll(); elements.messageInput.focus(); });
   elements.threadList.addEventListener("click", async event => {
     const button = event.target.closest("[data-thread-id]");
     if (!button) return;
     setRoute("chat");
     await invoke("resumethread", button.dataset.threadId, elements.modelSelect.value || "");
+    await poll();
   });
   elements.composer.addEventListener("submit", async event => {
     event.preventDefault();

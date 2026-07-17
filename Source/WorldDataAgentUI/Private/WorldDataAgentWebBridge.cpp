@@ -182,17 +182,37 @@ void UWorldDataAgentWebBridge::RefreshThreads()
 
 void UWorldDataAgentWebBridge::NewConversation()
 {
-	ActiveThreadId.Empty();
+	if (bBusy)
+	{
+		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current response to finish before starting a new conversation."));
+		return;
+	}
+	if (bActiveThreadIsDraft)
+	{
+		Threads.RemoveAll([this](const FWorldDataThreadSummary& Thread) { return Thread.Id == ActiveThreadId; });
+	}
 	ConversationItems.Empty();
 	PendingFirstMessage.Empty();
-	bBusy = false;
+	PendingApproval = FWorldDataAgentEvent();
 	UiErrorCode.Empty();
 	UiErrorMessage.Empty();
+	AddDraftConversation();
 }
 
 void UWorldDataAgentWebBridge::ResumeThread(const FString& ThreadId, const FString& Model)
 {
-	if (ThreadId.IsEmpty() || bBusy) return;
+	if (ThreadId.IsEmpty()) return;
+	if (bActiveThreadIsDraft && ThreadId == ActiveThreadId) return;
+	if (bBusy)
+	{
+		SetUiError(TEXT("thread.busy"), TEXT("Wait for the current response to finish before switching conversations."));
+		return;
+	}
+	if (bActiveThreadIsDraft)
+	{
+		Threads.RemoveAll([this](const FWorldDataThreadSummary& Thread) { return Thread.Id == ActiveThreadId; });
+		bActiveThreadIsDraft = false;
+	}
 	SelectedModel = Model;
 	bBusy = true;
 	FWorldDataResumeThreadRequest Request;
@@ -225,7 +245,7 @@ void UWorldDataAgentWebBridge::SendMessage(const FString& ThreadId, const FStrin
 	UserItem.Text = Message;
 	ConversationItems.Add(MoveTemp(UserItem));
 	bBusy = true;
-	if (ActiveThreadId.IsEmpty())
+	if (ActiveThreadId.IsEmpty() || bActiveThreadIsDraft)
 	{
 		PendingFirstMessage = Message;
 		StartThreadForPendingMessage();
@@ -254,19 +274,37 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 		if (Event.Status.State == EWorldDataAgentConnectionState::Ready && Threads.IsEmpty()) RefreshThreads();
 		break;
 	case EWorldDataAgentEventType::ThreadsListed:
-		Threads = Event.Threads;
+		if (bActiveThreadIsDraft)
+		{
+			const FWorldDataThreadSummary* Draft = Threads.FindByPredicate([this](const FWorldDataThreadSummary& Thread)
+			{
+				return Thread.Id == ActiveThreadId;
+			});
+			const TOptional<FWorldDataThreadSummary> SavedDraft = Draft ? TOptional<FWorldDataThreadSummary>(*Draft) : TOptional<FWorldDataThreadSummary>();
+			Threads = Event.Threads;
+			if (SavedDraft.IsSet()) Threads.Insert(SavedDraft.GetValue(), 0);
+		}
+		else
+		{
+			Threads = Event.Threads;
+		}
 		break;
 	case EWorldDataAgentEventType::ThreadCreated:
-		ActiveThreadId = Event.ThreadId;
+		BindDraftConversation(Event.ThreadId);
 		if (!PendingFirstMessage.IsEmpty())
 		{
 			const FString Message = MoveTemp(PendingFirstMessage);
 			PendingFirstMessage.Empty();
 			SendTurn(Message);
 		}
+		else
+		{
+			bBusy = false;
+		}
 		break;
 	case EWorldDataAgentEventType::ThreadLoaded:
 		ActiveThreadId = Event.ThreadId;
+		bActiveThreadIsDraft = false;
 		ConversationItems = Event.ConversationItems;
 		bBusy = false;
 		break;
@@ -320,6 +358,55 @@ void UWorldDataAgentWebBridge::HandleAgentEvent(const FWorldDataAgentEvent& Even
 		break;
 	default:
 		break;
+	}
+}
+
+void UWorldDataAgentWebBridge::AddDraftConversation()
+{
+	const int64 Now = FDateTime::UtcNow().ToUnixTimestamp();
+	FWorldDataThreadSummary Draft;
+	Draft.Id = FString::Printf(TEXT("draft-%s"), *FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphensLower));
+	Draft.Title = TEXT("新对话");
+	Draft.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	Draft.CreatedAt = Now;
+	Draft.UpdatedAt = Now;
+	Draft.RecencyAt = Now;
+	Draft.Status = TEXT("draft");
+	ActiveThreadId = Draft.Id;
+	bActiveThreadIsDraft = true;
+	Threads.Insert(MoveTemp(Draft), 0);
+}
+
+void UWorldDataAgentWebBridge::BindDraftConversation(const FString& ThreadId)
+{
+	const FString PreviousId = ActiveThreadId;
+	ActiveThreadId = ThreadId;
+	if (bActiveThreadIsDraft)
+	{
+		if (FWorldDataThreadSummary* Draft = Threads.FindByPredicate([&PreviousId](const FWorldDataThreadSummary& Thread)
+		{
+			return Thread.Id == PreviousId;
+		}))
+		{
+			Draft->Id = ThreadId;
+			Draft->Status = TEXT("active");
+		}
+		bActiveThreadIsDraft = false;
+		return;
+	}
+
+	if (!Threads.ContainsByPredicate([&ThreadId](const FWorldDataThreadSummary& Thread) { return Thread.Id == ThreadId; }))
+	{
+		const int64 Now = FDateTime::UtcNow().ToUnixTimestamp();
+		FWorldDataThreadSummary Thread;
+		Thread.Id = ThreadId;
+		Thread.Title = TEXT("新对话");
+		Thread.WorkingDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+		Thread.CreatedAt = Now;
+		Thread.UpdatedAt = Now;
+		Thread.RecencyAt = Now;
+		Thread.Status = TEXT("active");
+		Threads.Insert(MoveTemp(Thread), 0);
 	}
 }
 
