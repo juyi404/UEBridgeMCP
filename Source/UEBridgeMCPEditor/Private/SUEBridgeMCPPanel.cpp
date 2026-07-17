@@ -1,4 +1,5 @@
 #include "SUEBridgeMCPPanel.h"
+#include "SUEBridgeMCPApprovalView.h"
 
 #include "WorldDataAgentBackend.h"
 #include "UEBridgeMCPAgentController.h"
@@ -1903,85 +1904,28 @@ private:
 
 	TSharedRef<SWidget> BuildMcpApprovalCard()
 	{
-		return SNew(SBorder)
-			.Padding(1.0f)
-			.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-			.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBorderColor(), UEBridgeMCP::Palette::Warning(), 0.70f)); })
-			[
-				SNew(SBorder)
-				.Padding(FMargin(12.0f, 10.0f))
-				.BorderImage(FAppStyle::GetBrush("WhiteBrush"))
-				.BorderBackgroundColor_Lambda([this] { return FSlateColor(UEBridgeMCP::Palette::Blend(GetPanelBackgroundColor(), UEBridgeMCP::Palette::Warning(), 0.12f)); })
-				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center)
-					[
-						SNew(SVerticalBox)
-						+ SVerticalBox::Slot().AutoHeight()
-						[
-							SNew(STextBlock)
-							.Text(LOCTEXT("McpApprovalCardTitle", "MCP Change Approval"))
-							.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
-							.Font(FAppStyle::GetFontStyle("NormalFontBold"))
-						]
-						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
-						[
-							SNew(STextBlock)
-							.Text_Lambda([this]
-							{
-								FWorldDataMCPApprovalSummary Approval;
-								if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
-								return FText::FromString(FString::Printf(TEXT("Tool: %s  |  Risk: %s  |  Expires UTC: %s"), *Approval.ToolName, *Approval.Risk, *Approval.ExpiresAtUtc.ToIso8601()));
-							})
-							.ColorAndOpacity(FSlateColor(GetPanelTextColor()))
-						]
-						+ SVerticalBox::Slot().AutoHeight().Padding(0.0f, 2.0f, 0.0f, 0.0f)
-						[
-							SNew(STextBlock)
-							.AutoWrapText(true)
-							.Text_Lambda([this]
-							{
-								FWorldDataMCPApprovalSummary Approval;
-								if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
-								const FString Status = Approval.bReadyForDecision ? TEXT("Ready for decision") : TEXT("Capturing target revision");
-								return FText::FromString(FString::Printf(TEXT("%s\nChange hash: %s\nTarget revision: %s\n%s"), *Approval.TargetSummary, *Approval.ChangeSummaryHash.Left(16), *Approval.TargetRevision.Left(16), *Status));
-							})
-							.ColorAndOpacity(FSlateColor(GetPanelMutedTextColor()))
-						]
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(12.0f, 0.0f, 6.0f, 0.0f)
-					[
-						SNew(SButton)
-						.ButtonStyle(&ComposerButtonStyle)
-						.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentControlColor()); })
-						.ForegroundColor_Lambda([this] { return FSlateColor(GetPanelTextColor()); })
-						.ContentPadding(FMargin(12.0f, 4.0f))
-						.OnClicked(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, false))
-						[
-							SNew(STextBlock).Text(LOCTEXT("McpApprovalDeny", "Deny"))
-						]
-					]
-					+ SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center)
-					[
-						SNew(SButton)
-						.ButtonStyle(&ComposerButtonStyle)
-						.ButtonColorAndOpacity_Lambda([this] { return FSlateColor(GetAccentButtonColor()); })
-						.ForegroundColor_Lambda([this] { return FSlateColor(GetAccentButtonTextColor()); })
-						.ContentPadding(FMargin(12.0f, 4.0f))
-						.IsEnabled_Lambda([this]
-						{
-							FWorldDataMCPApprovalSummary Approval;
-							return GetNextMcpApproval(Approval) && Approval.bReadyForDecision;
-						})
-						.OnClicked(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, true))
-						[
-							SNew(STextBlock).Text(LOCTEXT("McpApprovalApprove", "Approve"))
-						]
-					]
-				]
-			];
+		return SNew(SUEBridgeMCPApprovalView)
+			.Summary_Lambda([this]
+			{
+				FWorldDataMCPApprovalSummary Approval;
+				if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
+				return FText::FromString(FString::Printf(TEXT("Tool: %s  |  Risk: %s  |  Expires UTC: %s"), *Approval.ToolName, *Approval.Risk, *Approval.ExpiresAtUtc.ToIso8601()));
+			})
+			.Details_Lambda([this]
+			{
+				FWorldDataMCPApprovalSummary Approval;
+				if (!GetNextMcpApproval(Approval)) return FText::GetEmpty();
+				const FString Status = Approval.bReadyForDecision ? TEXT("Ready for decision") : TEXT("Capturing target revision");
+				return FText::FromString(FString::Printf(TEXT("%s\nChange hash: %s\nTarget revision: %s\n%s"), *Approval.TargetSummary, *Approval.ChangeSummaryHash.Left(16), *Approval.TargetRevision.Left(16), *Status));
+			})
+			.CanApprove_Lambda([this]
+			{
+				FWorldDataMCPApprovalSummary Approval;
+				return GetNextMcpApproval(Approval) && Approval.bReadyForDecision;
+			})
+			.OnDeny(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, false))
+			.OnApprove(FOnClicked::CreateSP(this, &SUEBridgeMCPPanel::OnResolveMcpApprovalClicked, true));
 	}
-
 	FReply OnResolveMcpApprovalClicked(bool bApprove)
 	{
 		FWorldDataMCPApprovalSummary Approval;
